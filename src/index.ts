@@ -7,6 +7,7 @@ export { VariableCondition } from './core/VariableCondition';
 export { Inventory } from './core/Inventory';
 export { QuestSystem } from './core/QuestSystem';
 export { SaveLoad } from './core/SaveLoad';
+export { DebugRunner } from './core/DebugRunner';
 
 export {
   ComparisonOp,
@@ -57,4 +58,12 @@ export {
   ValidationPathStep,
   ValidationIssue,
   SDKConfig,
+  DebugStepVariableChange,
+  DebugStepItemChange,
+  DebugStepQuestChange,
+  DebugStepInfo,
+  MigrationMapping,
+  MigrationFn,
+  DebugSessionRecord,
+  DebugSession,
 } from './core/types';

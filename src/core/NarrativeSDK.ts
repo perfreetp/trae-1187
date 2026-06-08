@@ -24,6 +24,9 @@ import {
   LoadResult,
   ValidationIssue,
   ValidationPathStep,
+  MigrationFn,
+  DebugSession,
+  DebugSessionRecord,
 } from './types';
 import { ScriptParser } from './ScriptParser';
 import { ChapterManager } from './ChapterManager';
@@ -56,6 +59,9 @@ export class NarrativeSDK {
   private puzzleHandlers: Map<string, PuzzleHandler> = new Map();
   private pendingPuzzleNodeId: string | null = null;
   private puzzleResolveCallback: ((result: PuzzleResult) => void) | null = null;
+  private migrations: Map<string, MigrationFn> = new Map();
+  private sessionRecords: DebugSessionRecord[] = [];
+  private sessionStartedAt: number = 0;
 
   constructor(config: SDKConfig) {
     this.config = config;
@@ -104,6 +110,66 @@ export class NarrativeSDK {
     }
     if (this.debug) {
       this.debugLog.push({ timestamp: Date.now(), level: 'event', message: String(type), data });
+    }
+    this.trackSessionEvent(type as string, data);
+  }
+
+  private trackSessionEvent(type: string, data: unknown): void {
+    const now = Date.now();
+    const stateSnap = this.state !== 'idle' ? {
+      nodeId: this.currentNodeId,
+      chapterId: this.chapterManager.getCurrentChapterId(),
+      variables: this.variableCondition.getAll(),
+      inventoryCount: this.inventory.getAllEntries().length,
+      activeQuestCount: this.questSystem.getActiveQuests().length,
+    } : undefined;
+
+    switch (type) {
+      case 'choice': {
+        const cd = data as { nodeId: string };
+        this.sessionRecords.push({ type: 'choice', timestamp: now, data: { nodeId: cd.nodeId }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'puzzleResolved': {
+        const pr = data as { puzzleId: string; result: PuzzleResult; nextNodeId: string | null };
+        this.sessionRecords.push({ type: 'puzzle_result', timestamp: now, data: { puzzleId: pr.puzzleId, result: pr.result, nextNodeId: pr.nextNodeId }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'chapterChange': {
+        const cc = data as { chapterId: string };
+        this.sessionRecords.push({ type: 'chapter_change', timestamp: now, data: { chapterId: cc.chapterId }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'ending': {
+        const ed = data as { endingId: string; name: string };
+        this.sessionRecords.push({ type: 'ending', timestamp: now, data: { endingId: ed.endingId, name: ed.name }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'itemAdd': {
+        const ia = data as { itemId: string; count: number };
+        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'itemAdd', itemId: ia.itemId, count: ia.count }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'itemRemove': {
+        const ir = data as { itemId: string; count: number };
+        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'itemRemove', itemId: ir.itemId, count: ir.count }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'questStart': {
+        const qs = data as { questId: string };
+        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'questStart', questId: qs.questId }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'questComplete': {
+        const qc = data as { questId: string };
+        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'questComplete', questId: qc.questId }, stateSnapshot: stateSnap });
+        break;
+      }
+      case 'variableChange': {
+        const vc = data as { key: string; oldValue: unknown; newValue: unknown };
+        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'variableChange', key: vc.key, oldValue: vc.oldValue, newValue: vc.newValue }, stateSnapshot: stateSnap });
+        break;
+      }
     }
   }
 
@@ -170,6 +236,8 @@ export class NarrativeSDK {
     this.state = 'running';
     this.currentNodeId = startNode.id;
     this.saveLoad.markNodeVisited(startNode.id);
+    this.sessionStartedAt = Date.now();
+    this.sessionRecords = [];
 
     this.logDebug('SDK started', { chapterId: this.chapterManager.getCurrentChapterId(), nodeId: startNode.id });
 
@@ -660,16 +728,24 @@ export class NarrativeSDK {
   }
 
   load(snapshot: Snapshot): LoadResult {
-    const result = this.saveLoad.restoreSnapshot(snapshot);
+    let workingSnapshot = snapshot;
+    if (workingSnapshot.version !== this.saveLoad.getSaveVersion()) {
+      const migrationResult = this.applyMigrations(workingSnapshot);
+      if (!migrationResult.success) return migrationResult;
+      if (migrationResult.migratedSnapshot) {
+        workingSnapshot = migrationResult.migratedSnapshot;
+      }
+    }
+    const result = this.saveLoad.restoreSnapshot(workingSnapshot);
     if (result.success) {
-      this.currentNodeId = snapshot.currentNodeId;
-      this.pendingPuzzleNodeId = snapshot.pendingPuzzleNodeId || null;
+      this.currentNodeId = workingSnapshot.currentNodeId;
+      this.pendingPuzzleNodeId = workingSnapshot.pendingPuzzleNodeId || null;
 
-      if (snapshot.pendingState === 'waiting_choice') {
+      if (workingSnapshot.pendingState === 'waiting_choice') {
         this.state = 'waiting_choice';
-      } else if (snapshot.pendingState === 'waiting_puzzle') {
+      } else if (workingSnapshot.pendingState === 'waiting_puzzle') {
         this.state = 'waiting_puzzle';
-      } else if (snapshot.pendingState === 'ended') {
+      } else if (workingSnapshot.pendingState === 'ended') {
         this.state = 'ended';
       } else {
         this.state = 'running';
@@ -691,28 +767,26 @@ export class NarrativeSDK {
   }
 
   loadFromString(json: string): LoadResult {
-    const result = this.saveLoad.deserialize(json);
-    if (result.success) {
-      const parsed = JSON.parse(json) as Snapshot;
-      this.currentNodeId = parsed.currentNodeId;
-      this.pendingPuzzleNodeId = parsed.pendingPuzzleNodeId || null;
-
-      if (parsed.pendingState === 'waiting_choice') {
-        this.state = 'waiting_choice';
-      } else if (parsed.pendingState === 'waiting_puzzle') {
-        this.state = 'waiting_puzzle';
-      } else if (parsed.pendingState === 'ended') {
-        this.state = 'ended';
-      } else {
-        this.state = 'running';
-      }
-
-      this.logDebug('Game loaded from string', { state: this.state, nodeId: this.currentNodeId });
-    } else {
-      this.logError('Game load from string failed', result);
-      this.emit('error', { message: 'Load from string failed', error: result.error, detail: result.message });
+    let parsed: Snapshot;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      return { success: false, error: 'invalid_json', message: 'Failed to parse save data as JSON' };
     }
-    return result;
+
+    if (parsed.version !== this.saveLoad.getSaveVersion()) {
+      const migrationResult = this.applyMigrations(parsed);
+      if (!migrationResult.success) {
+        this.logError('Migration during loadFromString failed', migrationResult);
+        this.emit('error', { message: 'Migration failed', error: migrationResult.error, detail: migrationResult.message });
+        return migrationResult;
+      }
+      if (migrationResult.migratedSnapshot) {
+        parsed = migrationResult.migratedSnapshot;
+      }
+    }
+
+    return this.load(parsed);
   }
 
   exportDebugLog(): Array<{ timestamp: number; level: string; message: string; data?: unknown }> {
@@ -825,6 +899,13 @@ export class NarrativeSDK {
       }
     }
 
+    const firstChapter = chapters[0];
+    const startNodeId = firstChapter?.nodes[0]?.id || '';
+    const routeCache = new Map<string, ValidationPathStep[]>();
+    if (startNodeId) {
+      this.buildRouteFromStart(startNodeId, nodeMap, chapterMap, new Set(), [], routeCache);
+    }
+
     for (const chapter of chapters) {
       for (const node of chapter.nodes) {
         const nextIds = this.getNodeNextIds(node);
@@ -838,6 +919,7 @@ export class NarrativeSDK {
               chapterId: chapter.id,
               nodeId: node.id,
               path: [{ chapterId: chapter.id, nodeId: node.id }],
+              routeFromStart: routeCache.get(node.id) || undefined,
             });
           }
         }
@@ -850,6 +932,7 @@ export class NarrativeSDK {
             chapterId: chapter.id,
             nodeId: node.id,
             path: [{ chapterId: chapter.id, nodeId: node.id }],
+            routeFromStart: routeCache.get(node.id) || undefined,
           });
         }
       }
@@ -879,6 +962,7 @@ export class NarrativeSDK {
                   optionText: opt.text,
                 })),
               ],
+              routeFromStart: routeCache.get(node.id) || undefined,
             });
           }
 
@@ -886,6 +970,7 @@ export class NarrativeSDK {
             const opt = choiceNode.options[i];
             if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node)) {
               const reason = this.describeUnsatisfiableReason(opt.condition, nodeMap, node);
+              const detail = this.buildUnsatisfiableDetail(opt.condition, nodeMap, node);
               issues.push({
                 kind: 'unsatisfiable_condition',
                 severity: 'warning',
@@ -895,6 +980,8 @@ export class NarrativeSDK {
                 path: [
                   { chapterId: chapter.id, nodeId: node.id, optionIndex: i, optionText: opt.text },
                 ],
+                routeFromStart: routeCache.get(node.id) || undefined,
+                detail,
               });
             }
           }
@@ -923,54 +1010,69 @@ export class NarrativeSDK {
           chapterId: chId,
           nodeId: endingNode.id,
           path: [],
+          routeFromStart: routeCache.get(endingNode.id) || undefined,
         });
       }
     }
 
     const cyclePaths = this.findCycles(nodeMap, chapterMap);
+    const reportedCycles = new Set<string>();
 
     for (const cycle of cyclePaths) {
       const cycleNodeIds = new Set(cycle.path.map((s) => s.nodeId));
-      const hasExitToNonCycle = cycle.path.some((step) => {
-        const node = nodeMap.get(step.nodeId);
-        if (!node) return false;
-        const nextIds = this.getNextIds(node);
-        return nextIds.some((nextId) => !cycleNodeIds.has(nextId) && nodeMap.has(nextId));
-      });
+      const cycleKey = Array.from(cycleNodeIds).sort().join('|');
+      if (reportedCycles.has(cycleKey)) continue;
 
-      if (!hasExitToNonCycle) {
+      const exitsToNonCycle: Array<{ step: ValidationPathStep; nextId: string }> = [];
+      for (const step of cycle.path) {
+        const node = nodeMap.get(step.nodeId);
+        if (!node) continue;
+        const nextIds = this.getNextIds(node);
+        for (const nextId of nextIds) {
+          if (!cycleNodeIds.has(nextId) && nodeMap.has(nextId)) {
+            exitsToNonCycle.push({ step, nextId });
+          }
+        }
+      }
+
+      if (exitsToNonCycle.length === 0) {
+        reportedCycles.add(cycleKey);
         issues.push({
           kind: 'no_exit_from_loop',
           severity: 'error',
-          message: `节点 "${cycle.nodeId}" 处于循环中且所有分支都绕回循环，玩家将永远无法到达结局`,
+          message: `循环中所有分支都绕回循环，玩家将永远无法到达结局 (循环节点: ${Array.from(cycleNodeIds).join(', ')})`,
           chapterId: cycle.chapterId,
           nodeId: cycle.nodeId,
           path: cycle.path,
+          routeFromStart: routeCache.get(cycle.nodeId) || undefined,
+          detail: this.buildCycleExitDetail(exitsToNonCycle, nodeMap),
         });
-      } else {
-        const anyCycleNodeReachesEnding = cycle.path.some((step) => {
-          const reachableEndings = reachability.get(step.nodeId);
-          return reachableEndings && reachableEndings.size > 0;
+        continue;
+      }
+
+      const anyExitReachesEnding = exitsToNonCycle.some((ex) => {
+        const reachableEndings = reachability.get(ex.nextId);
+        return reachableEndings && reachableEndings.size > 0;
+      });
+
+      if (!anyExitReachesEnding) {
+        reportedCycles.add(cycleKey);
+        const exitsDetail = exitsToNonCycle.map((ex) => {
+          const exitNode = nodeMap.get(ex.nextId);
+          const reachableEnds = reachability.get(ex.nextId);
+          return `出口 "${ex.step.nodeId}" → "${ex.nextId}" (类型: ${exitNode?.type || '?'}, 可达结局数: ${reachableEnds?.size || 0})`;
+        }).join('; ');
+        issues.push({
+          kind: 'no_exit_from_loop',
+          severity: 'error',
+          message: `循环虽然有不绕回循环的出口，但所有出口路径均无法到达结局 (循环节点: ${Array.from(cycleNodeIds).join(', ')})`,
+          chapterId: cycle.chapterId,
+          nodeId: cycle.nodeId,
+          path: cycle.path,
+          routeFromStart: routeCache.get(cycle.nodeId) || undefined,
+          detail: exitsDetail,
         });
-        if (!anyCycleNodeReachesEnding) {
-          issues.push({
-            kind: 'no_exit_from_loop',
-            severity: 'error',
-            message: `循环中的节点虽然有不绕回循环的出口，但所有出口路径均无法到达结局`,
-            chapterId: cycle.chapterId,
-            nodeId: cycle.nodeId,
-            path: cycle.path,
-          });
-        } else {
-          issues.push({
-            kind: 'infinite_loop',
-            severity: 'warning',
-            message: `节点 "${cycle.nodeId}" 处于循环中，需确认条件分支能跳出循环到达结局`,
-            chapterId: cycle.chapterId,
-            nodeId: cycle.nodeId,
-            path: cycle.path,
-          });
-        }
+        continue;
       }
     }
 
@@ -991,6 +1093,7 @@ export class NarrativeSDK {
                 path: [
                   { chapterId: chapter.id, nodeId: node.id, optionIndex: i, optionText: opt.text },
                 ],
+                routeFromStart: routeCache.get(node.id) || undefined,
               });
             }
           }
@@ -1209,6 +1312,140 @@ export class NarrativeSDK {
     return '';
   }
 
+  private buildUnsatisfiableDetail(
+    condition: Condition | ConditionGroup,
+    nodeMap: Map<string, StoryNode>,
+    choiceNode: StoryNode
+  ): string {
+    const parts: string[] = [];
+    this.collectConditionDetails(condition, nodeMap, choiceNode, parts);
+    return parts.join(' | ');
+  }
+
+  private collectConditionDetails(
+    condition: Condition | ConditionGroup,
+    nodeMap: Map<string, StoryNode>,
+    choiceNode: StoryNode,
+    parts: string[]
+  ): void {
+    if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
+      const group = condition as ConditionGroup;
+      for (const c of group.conditions) {
+        this.collectConditionDetails(c, nodeMap, choiceNode, parts);
+      }
+      return;
+    }
+    const cond = condition as Condition;
+    const varName = cond.var;
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+
+    if (setVarNodes.length === 0) {
+      parts.push(`变量 "${varName}" 在脚本中未被任何节点设置过`);
+      return;
+    }
+
+    const reachableFromChoice = this.findNodesReachableFrom(choiceNode.id, nodeMap);
+    const allPathsFromStart = this.findNodesReachableFrom(nodeMap.values().next().value?.id || '', nodeMap);
+    const beforeChoice = setVarNodes.filter((n) => {
+      const setVarReachable = this.findNodesReachableFrom(n.id, nodeMap);
+      return setVarReachable.has(choiceNode.id) || !allPathsFromStart.has(choiceNode.id);
+    });
+    const afterChoice = setVarNodes.filter((n) =>
+      reachableFromChoice.has(n.id) && !beforeChoice.includes(n)
+    );
+    const unreachable = setVarNodes.filter((n) =>
+      !beforeChoice.includes(n) && !afterChoice.includes(n)
+    );
+
+    if (beforeChoice.length === 0 && afterChoice.length > 0) {
+      const nodeList = afterChoice.map((n) => n.id).join(', ');
+      parts.push(`变量 "${varName}" 只在选项之后的节点 (${nodeList}) 中设置，选项选择时变量尚未初始化`);
+    }
+
+    if (unreachable.length === setVarNodes.length) {
+      const nodeList = setVarNodes.map((n) => n.id).join(', ');
+      parts.push(`设置变量 "${varName}" 的节点 (${nodeList}) 与当前选项互斥或不在可达路径上`);
+    }
+
+    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    if (typeof cond.value === 'number' && possibleValues.numbers.length > 0) {
+      const setOps = possibleValues.numbers;
+      if (setOps.length > 0) {
+        const isOnlyAdditive = setOps.every((v) => v > 0 && v < Math.abs(cond.value as number));
+        if (isOnlyAdditive && (cond.op === '>' || cond.op === '>=')) {
+          const total = setOps.reduce((a, b) => a + b, 0);
+          parts.push(`变量 "${varName}" 的所有增量操作总和为 ${total}，最大也达不到 ${cond.op} ${cond.value} 的要求`);
+        }
+        const maxPossible = Math.max(...setOps);
+        if (maxPossible < (cond.value as number) && (cond.op === '>' || cond.op === '>=')) {
+          parts.push(`变量 "${varName}" 单次设置的最大值为 ${maxPossible}，均小于要求 ${cond.op} ${cond.value}`);
+        }
+      }
+    }
+  }
+
+  private buildCycleExitDetail(
+    exits: Array<{ step: ValidationPathStep; nextId: string }>,
+    nodeMap: Map<string, StoryNode>
+  ): string {
+    if (exits.length === 0) return '无任何出口指向循环外部节点';
+    const exitDescs = exits.map((ex) => {
+      const exitNode = nodeMap.get(ex.nextId);
+      const nodeType = exitNode?.type || 'unknown';
+      return `从 "${ex.step.nodeId}" 出口到 "${ex.nextId}" (${nodeType})`;
+    });
+    return exitDescs.join('; ');
+  }
+
+  private buildRouteFromStart(
+    nodeId: string,
+    nodeMap: Map<string, StoryNode>,
+    chapterMap: Map<string, string>,
+    pathSet: Set<string>,
+    pathStack: ValidationPathStep[],
+    routeCache: Map<string, ValidationPathStep[]>
+  ): void {
+    if (pathSet.has(nodeId)) return;
+    if (routeCache.has(nodeId)) return;
+
+    const node = nodeMap.get(nodeId);
+    if (!node) return;
+
+    const currentStep: ValidationPathStep = {
+      chapterId: chapterMap.get(nodeId) || '',
+      nodeId,
+    };
+    const newPath = [...pathStack, currentStep];
+    routeCache.set(nodeId, [...newPath]);
+
+    pathSet.add(nodeId);
+    const nextIds = this.getNodeNextIds(node);
+    const choiceOptions: Array<{ nextId: string; optIdx?: number; optText?: string }> = [];
+    if (node.type === 'choice') {
+      for (let i = 0; i < node.options.length; i++) {
+        choiceOptions.push({
+          nextId: node.options[i].next,
+          optIdx: i,
+          optText: node.options[i].text,
+        });
+      }
+    } else {
+      for (const nextId of nextIds) {
+        choiceOptions.push({ nextId });
+      }
+    }
+
+    for (const co of choiceOptions) {
+      if (co.optIdx !== undefined) {
+        currentStep.optionIndex = co.optIdx;
+        currentStep.optionText = co.optText;
+        routeCache.set(nodeId, [...newPath]);
+      }
+      this.buildRouteFromStart(co.nextId, nodeMap, chapterMap, pathSet, newPath, routeCache);
+    }
+    pathSet.delete(nodeId);
+  }
+
   private getNodeActions(node: StoryNode): Action[] {
     const actions: Action[] = [];
     switch (node.type) {
@@ -1385,6 +1622,71 @@ export class NarrativeSDK {
 
   getVisitedNodes(): string[] {
     return this.saveLoad.getVisitedNodes();
+  }
+
+  registerMigration(migration: MigrationFn): void {
+    this.migrations.set(migration.fromVersion, migration);
+    this.logDebug(`Migration registered: ${migration.fromVersion} → ${migration.toVersion}`);
+  }
+
+  private applyMigrations(snapshot: Snapshot): LoadResult & { migratedSnapshot?: Snapshot } {
+    const migrationPath: string[] = [];
+    let current: Snapshot = { ...snapshot };
+    let currentVersion = current.version;
+
+    const maxSteps = 20;
+    let steps = 0;
+
+    while (currentVersion !== this.saveLoad.getSaveVersion() && steps < maxSteps) {
+      steps++;
+      const migration = this.migrations.get(currentVersion);
+      if (!migration) {
+        return {
+          success: false,
+          error: 'migration_failed',
+          message: `No migration path from version "${currentVersion}" to "${this.saveLoad.getSaveVersion()}" (path: ${migrationPath.length > 0 ? migrationPath.join(' → ') : 'none'})`,
+        };
+      }
+      try {
+        current = migration.migrate(current);
+        migrationPath.push(`${currentVersion} → ${migration.toVersion}`);
+        currentVersion = migration.toVersion;
+        current = { ...current, version: migration.toVersion };
+      } catch (err) {
+        return {
+          success: false,
+          error: 'migration_failed',
+          message: `Migration from "${currentVersion}" to "${migration.toVersion}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+    }
+
+    if (currentVersion !== this.saveLoad.getSaveVersion()) {
+      return {
+        success: false,
+        error: 'migration_failed',
+        message: `Could not reach target version "${this.saveLoad.getSaveVersion()}" (got to "${currentVersion}", path: ${migrationPath.join(' → ')})`,
+      };
+    }
+
+    return { success: true, migratedSnapshot: current };
+  }
+
+  exportSession(): DebugSession {
+    const script = this.parser.getScript();
+    return {
+      scriptTitle: script.meta.title,
+      scriptVersion: script.meta.version,
+      locale: this.locale,
+      startedAt: this.sessionStartedAt,
+      endedAt: this.state === 'ended' ? Date.now() : undefined,
+      totalSteps: this.sessionRecords.filter((r) => r.type === 'step').length,
+      records: [...this.sessionRecords],
+    };
+  }
+
+  exportSessionJSON(): string {
+    return JSON.stringify(this.exportSession(), null, 2);
   }
 
   reset(startChapterId?: string): void {

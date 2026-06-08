@@ -235,6 +235,10 @@ export class SaveLoad {
     this.visitedNodes.add(nodeId);
   }
 
+  getSaveVersion(): string {
+    return SAVE_VERSION;
+  }
+
   isNodeVisited(nodeId: string): boolean {
     return this.visitedNodes.has(nodeId);
   }

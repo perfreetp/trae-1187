@@ -253,7 +253,7 @@ export interface Snapshot {
 
 export interface LoadResult {
   success: boolean;
-  error?: 'invalid_json' | 'version_mismatch' | 'structure_corrupted' | 'missing_fields' | 'invalid_state';
+  error?: 'invalid_json' | 'version_mismatch' | 'structure_corrupted' | 'missing_fields' | 'invalid_state' | 'migration_failed';
   message?: string;
 }
 
@@ -342,6 +342,80 @@ export interface ValidationIssue {
   chapterId: string;
   nodeId: string;
   path: ValidationPathStep[];
+  routeFromStart?: ValidationPathStep[];
+  detail?: string;
+}
+
+export interface DebugStepVariableChange {
+  key: string;
+  oldValue: string | number | boolean | undefined;
+  newValue: string | number | boolean;
+}
+
+export interface DebugStepItemChange {
+  itemId: string;
+  change: 'add' | 'remove';
+  count: number;
+}
+
+export interface DebugStepQuestChange {
+  questId: string;
+  change: 'start' | 'complete' | 'fail' | 'objectiveComplete';
+  objectiveIndex?: number;
+}
+
+export interface DebugStepInfo {
+  stepIndex: number;
+  nodeId: string;
+  nodeType: StoryNode['type'];
+  chapterId: string;
+  state: string;
+  dialogueLine?: DialogueLine;
+  availableOptions?: Array<{ text: string; disabled: boolean; index: number; conditionDesc?: string }>;
+  puzzleInfo?: { puzzleId: string; params?: Record<string, unknown> };
+  endingInfo?: { endingId: string; name: string };
+  variableChanges: DebugStepVariableChange[];
+  itemChanges: DebugStepItemChange[];
+  questChanges: DebugStepQuestChange[];
+  events: Array<{ type: string; data: unknown }>;
+  timestamp: number;
+}
+
+export interface MigrationMapping {
+  variables?: Record<string, string>;
+  items?: Record<string, string>;
+  quests?: Record<string, string>;
+  customTransform?: (snapshot: Snapshot) => Snapshot;
+}
+
+export interface MigrationFn {
+  fromVersion: string;
+  toVersion: string;
+  mapping?: MigrationMapping;
+  migrate: (snapshot: Snapshot) => Snapshot;
+}
+
+export interface DebugSessionRecord {
+  type: 'choice' | 'puzzle_result' | 'chapter_change' | 'ending' | 'achievement' | 'step';
+  timestamp: number;
+  data: Record<string, unknown>;
+  stateSnapshot?: {
+    nodeId: string;
+    chapterId: string;
+    variables: Record<string, string | number | boolean>;
+    inventoryCount: number;
+    activeQuestCount: number;
+  };
+}
+
+export interface DebugSession {
+  scriptTitle: string;
+  scriptVersion: string;
+  locale: string;
+  startedAt: number;
+  endedAt?: number;
+  totalSteps: number;
+  records: DebugSessionRecord[];
 }
 
 export interface SDKConfig {
