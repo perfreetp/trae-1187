@@ -15,6 +15,7 @@ export class DialoguePlayer {
   private characterRegistrations: Map<string, CharacterRegistration> = new Map();
   private dialogueHistory: DialogueLine[] = [];
   private eventHandler?: EventHandler;
+  private localizeFn?: (text: string) => string;
 
   constructor(
     parser: ScriptParser,
@@ -24,6 +25,10 @@ export class DialoguePlayer {
     this.parser = parser;
     this.chapterManager = chapterManager;
     this.eventHandler = eventHandler;
+  }
+
+  setLocalizeFn(fn: (text: string) => string): void {
+    this.localizeFn = fn;
   }
 
   registerCharacter(characterId: string, registration: CharacterRegistration): void {
@@ -45,10 +50,13 @@ export class DialoguePlayer {
     const character = this.parser.getCharacter(dialogueNode.speaker);
     const registration = this.characterRegistrations.get(dialogueNode.speaker);
 
+    const localizedText = this.localizeFn ? this.localizeFn(dialogueNode.text) : undefined;
+
     const line: DialogueLine = {
       speaker: dialogueNode.speaker,
-      speakerName: character?.name || dialogueNode.speaker,
+      speakerName: this.localizeFn ? this.localizeFn(character?.name || dialogueNode.speaker) : (character?.name || dialogueNode.speaker),
       text: dialogueNode.text,
+      localizedText,
       avatar: registration?.avatar || character?.avatar,
       tone: registration?.tone || character?.tone,
       illustration: dialogueNode.illustration,

@@ -115,6 +115,11 @@ export class ScriptParser {
           break;
         case 'ending':
           break;
+        case 'puzzle':
+          refs.add(node.successNext);
+          if (node.failureNext) refs.add(node.failureNext);
+          if (node.cancelNext) refs.add(node.cancelNext);
+          break;
       }
     }
     return Array.from(refs);

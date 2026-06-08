@@ -6,20 +6,24 @@ import {
   NodeChoice,
   NodeAction,
   NodeGoto,
+  NodePuzzle,
   Action,
   CharacterRegistration,
   DialogueLine,
   ChoiceOption,
   Snapshot,
   StoryTreeNode,
-  EndingDef,
   NarrativeEvent,
   EventHandler,
   PuzzleHandler,
+  PuzzleResult,
   AchievementState,
   PlayerChoiceRecord,
   Condition,
   ConditionGroup,
+  LoadResult,
+  ValidationIssue,
+  ValidationPathStep,
 } from './types';
 import { ScriptParser } from './ScriptParser';
 import { ChapterManager } from './ChapterManager';
@@ -50,8 +54,8 @@ export class NarrativeSDK {
   private debugLog: Array<{ timestamp: number; level: string; message: string; data?: unknown }> = [];
   private eventHandlers: Map<string, EventHandler[]> = new Map();
   private puzzleHandlers: Map<string, PuzzleHandler> = new Map();
-  private onChoiceResolve: ((next: string) => void) | null = null;
-  private onPuzzleResolve: ((success: boolean) => void) | null = null;
+  private pendingPuzzleNodeId: string | null = null;
+  private puzzleResolveCallback: ((result: PuzzleResult) => void) | null = null;
 
   constructor(config: SDKConfig) {
     this.config = config;
@@ -74,16 +78,19 @@ export class NarrativeSDK {
     this.variableCondition = new VariableCondition(moduleEventHandler);
     this.choiceBranch = new ChoiceBranch(moduleEventHandler);
     this.choiceBranch.setVariables(this.variableCondition['store'] as Map<string, string | number | boolean>);
+    this.choiceBranch.setLocalizeFn((text: string) => this.localizeText(text));
     this.inventory = new Inventory(this.parser, moduleEventHandler);
     this.questSystem = new QuestSystem(this.parser, moduleEventHandler);
     this.dialoguePlayer = new DialoguePlayer(this.parser, this.chapterManager, moduleEventHandler);
+    this.dialoguePlayer.setLocalizeFn((text: string) => this.localizeText(text));
     this.saveLoad = new SaveLoad(
       this.variableCondition,
       this.inventory,
       this.questSystem,
       this.dialoguePlayer,
       this.choiceBranch,
-      this.chapterManager
+      this.chapterManager,
+      script.meta.saveVersion
     );
   }
 
@@ -183,6 +190,8 @@ export class NarrativeSDK {
         return this.processGoto(node);
       case 'ending':
         return this.processEnding(node);
+      case 'puzzle':
+        return this.processPuzzle(node);
       default:
         this.logError(`Unknown node type: ${(node as StoryNode).type}`);
         return null;
@@ -205,7 +214,7 @@ export class NarrativeSDK {
     if (node.timelimit && node.timelimit > 0) {
       const defaultIdx = node.defaultOption ?? 0;
       this.choiceBranch.startTimer(node.timelimit, defaultIdx, (idx) => {
-        this.makeChoice(node.id, idx);
+        this.makeChoice(node.id, idx, true);
       });
     }
 
@@ -260,7 +269,7 @@ export class NarrativeSDK {
 
     this.emit('ending', {
       endingId: node.endingId,
-      name: ending?.name || node.endingId,
+      name: this.localizeText(ending?.name || node.endingId),
       text: node.text ? this.localizeText(node.text) : undefined,
     });
 
@@ -268,7 +277,107 @@ export class NarrativeSDK {
     return null;
   }
 
-  makeChoice(nodeId: string, optionIndex: number): DialogueLine | null {
+  private processPuzzle(node: NodePuzzle): DialogueLine | null {
+    this.state = 'waiting_puzzle';
+    this.pendingPuzzleNodeId = node.id;
+
+    this.emit('puzzle', {
+      nodeId: node.id,
+      puzzleId: node.puzzleId,
+      params: node.params,
+    });
+
+    const handler = this.puzzleHandlers.get(node.puzzleId);
+    if (handler) {
+      this.invokePuzzleHandler(handler, node);
+    }
+
+    this.logDebug('Puzzle presented', { nodeId: node.id, puzzleId: node.puzzleId });
+    return null;
+  }
+
+  private async invokePuzzleHandler(handler: PuzzleHandler, node: NodePuzzle): Promise<void> {
+    try {
+      const result = await handler.handler(node.params);
+      if (this.pendingPuzzleNodeId === node.id) {
+        this.resolvePuzzle(result);
+      }
+    } catch (err) {
+      this.logError(`Puzzle handler error: ${err}`);
+      if (this.pendingPuzzleNodeId === node.id) {
+        this.resolvePuzzle('failure');
+      }
+    }
+  }
+
+  resolvePuzzle(result: PuzzleResult): DialogueLine | null {
+    if (this.state !== 'waiting_puzzle' || !this.pendingPuzzleNodeId) {
+      this.logError('No pending puzzle to resolve');
+      return null;
+    }
+
+    const nodeId = this.pendingPuzzleNodeId;
+    const node = this.parser.getNode(nodeId);
+    if (!node || node.type !== 'puzzle') {
+      this.state = 'running';
+      this.pendingPuzzleNodeId = null;
+      return null;
+    }
+
+    const puzzleNode = node as NodePuzzle;
+    this.pendingPuzzleNodeId = null;
+
+    let nextNodeId: string | undefined;
+    let actions: Action[] | undefined;
+
+    switch (result) {
+      case 'success':
+        nextNodeId = puzzleNode.successNext;
+        actions = puzzleNode.successActions;
+        break;
+      case 'failure':
+        nextNodeId = puzzleNode.failureNext;
+        actions = puzzleNode.failureActions;
+        break;
+      case 'cancel':
+        nextNodeId = puzzleNode.cancelNext;
+        actions = puzzleNode.cancelActions;
+        break;
+    }
+
+    if (actions) {
+      this.executeActions(actions);
+    }
+
+    this.emit('puzzleResolved', {
+      nodeId,
+      puzzleId: puzzleNode.puzzleId,
+      result,
+      nextNodeId: nextNodeId || null,
+    });
+
+    this.logDebug(`Puzzle resolved: ${result}`, { nodeId, puzzleId: puzzleNode.puzzleId });
+
+    this.state = 'running';
+
+    if (!nextNodeId) {
+      if (result === 'failure' && puzzleNode.failureNext === undefined) {
+        nextNodeId = puzzleNode.successNext;
+      } else if (result === 'cancel' && puzzleNode.cancelNext === undefined) {
+        nextNodeId = puzzleNode.successNext;
+      }
+    }
+
+    if (nextNodeId) {
+      const nextNode = this.parser.getNode(nextNodeId);
+      if (nextNode) return this.processNode(nextNode);
+      this.logError(`Puzzle next node not found: ${nextNodeId}`);
+    }
+
+    return null;
+  }
+
+  makeChoice(nodeId: string, optionIndex: number, expired: boolean = false): DialogueLine | null {
     const node = this.parser.getNode(nodeId);
     if (!node || node.type !== 'choice') {
       this.logError(`Not a choice node: ${nodeId}`);
@@ -277,7 +386,7 @@ export class NarrativeSDK {
 
     const choiceNode = node as NodeChoice;
     const chapterId = this.chapterManager.getCurrentChapterId();
-    const result = this.choiceBranch.selectOption(choiceNode, optionIndex, chapterId);
+    const result = this.choiceBranch.selectOption(choiceNode, optionIndex, chapterId, expired);
 
     if (!result) {
       this.logError(`Invalid choice: ${nodeId} option ${optionIndex}`);
@@ -316,6 +425,8 @@ export class NarrativeSDK {
         const nextNode = this.parser.getNode(actionNode.next);
         if (nextNode) return this.processNode(nextNode);
       }
+    } else if (currentNode.type === 'puzzle') {
+      return null;
     } else if (currentNode.type === 'choice') {
       return null;
     }
@@ -354,29 +465,9 @@ export class NarrativeSDK {
           this.emit('illustration', { illustrationId: action.illustrationId, duration: action.duration });
           break;
         case 'customPuzzle':
-          this.handlePuzzle(action.puzzleId, action.params);
+          this.emit('puzzle', { puzzleId: action.puzzleId, params: action.params, fromAction: true });
           break;
       }
-    }
-  }
-
-  private async handlePuzzle(puzzleId: string, params?: Record<string, unknown>): Promise<void> {
-    const handler = this.puzzleHandlers.get(puzzleId);
-    if (!handler) {
-      this.logError(`No puzzle handler for: ${puzzleId}`);
-      return;
-    }
-
-    this.state = 'waiting_puzzle';
-    this.emit('puzzle', { puzzleId, params });
-
-    try {
-      const success = await handler.handler(params);
-      this.state = 'running';
-      this.logDebug(`Puzzle ${puzzleId} resolved: ${success}`);
-    } catch (err) {
-      this.logError(`Puzzle ${puzzleId} error: ${err}`);
-      this.state = 'running';
     }
   }
 
@@ -406,11 +497,15 @@ export class NarrativeSDK {
   }
 
   getCurrentChapterTitle(): string {
-    return this.chapterManager.getChapterTitle();
+    const raw = this.chapterManager.getChapterTitle();
+    return this.localizeText(raw);
   }
 
   getChapterList(): Array<{ id: string; title: string; nodeCount: number }> {
-    return this.chapterManager.getChapterList();
+    return this.chapterManager.getChapterList().map((ch) => ({
+      ...ch,
+      title: this.localizeText(ch.title),
+    }));
   }
 
   getCurrentNodeId(): string {
@@ -458,8 +553,8 @@ export class NarrativeSDK {
       return {
         itemId: e.itemId,
         count: e.count,
-        name: def?.name || e.itemId,
-        description: def?.description,
+        name: this.localizeText(def?.name || e.itemId),
+        description: def?.description ? this.localizeText(def.description) : undefined,
       };
     });
   }
@@ -469,10 +564,10 @@ export class NarrativeSDK {
       const def = this.questSystem.getQuestDef(qs.questId);
       return {
         questId: qs.questId,
-        name: def?.name || qs.questId,
-        description: def?.description,
+        name: this.localizeText(def?.name || qs.questId),
+        description: def?.description ? this.localizeText(def.description) : undefined,
         objectives: (def?.objectives || []).map((text, i) => ({
-          text,
+          text: this.localizeText(text),
           completed: qs.completedObjectives[i] ?? false,
         })),
       };
@@ -483,37 +578,46 @@ export class NarrativeSDK {
     const endings = this.parser.getEndings();
     return Object.values(endings).map((ending) => ({
       endingId: ending.id,
-      name: ending.name,
+      name: this.localizeText(ending.name),
       conditionMet: !ending.condition || this.variableCondition.evaluate(ending.condition),
     }));
   }
 
   save(): Snapshot {
-    const snapshot = this.saveLoad.createSnapshot();
-    snapshot.currentNodeId = this.currentNodeId;
+    const snapshot = this.saveLoad.createSnapshot(this.currentNodeId);
     this.logDebug('Game saved');
     return snapshot;
   }
 
-  load(snapshot: Snapshot): boolean {
-    this.saveLoad.restoreSnapshot(snapshot);
-    this.currentNodeId = snapshot.currentNodeId;
-    this.state = 'running';
-    this.logDebug('Game loaded');
-    return true;
+  load(snapshot: Snapshot): LoadResult {
+    const result = this.saveLoad.restoreSnapshot(snapshot);
+    if (result.success) {
+      this.currentNodeId = snapshot.currentNodeId;
+      this.state = 'running';
+      this.logDebug('Game loaded');
+    } else {
+      this.logError('Game load failed', result);
+      this.emit('error', { message: 'Load failed', error: result.error, detail: result.message });
+    }
+    return result;
   }
 
   saveToString(): string {
-    return this.saveLoad.serialize();
+    return this.saveLoad.serialize(this.currentNodeId);
   }
 
-  loadFromString(json: string): boolean {
-    const snapshot = this.saveLoad.deserialize(json);
-    if (snapshot) {
-      this.currentNodeId = this.saveLoad.createSnapshot().currentNodeId;
+  loadFromString(json: string): LoadResult {
+    const result = this.saveLoad.deserialize(json);
+    if (result.success) {
+      const nodeId = this.saveLoad.getCurrentNodeId(json);
+      this.currentNodeId = nodeId || '';
       this.state = 'running';
+      this.logDebug('Game loaded from string');
+    } else {
+      this.logError('Game load from string failed', result);
+      this.emit('error', { message: 'Load from string failed', error: result.error, detail: result.message });
     }
-    return snapshot;
+    return result;
   }
 
   exportDebugLog(): Array<{ timestamp: number; level: string; message: string; data?: unknown }> {
@@ -533,33 +637,44 @@ export class NarrativeSDK {
     }
 
     const visited = new Set<string>();
-    const deadEnds = new Set<string>();
+    const deadEndCache = new Map<string, boolean>();
 
-    const isDeadEnd = (nodeId: string): boolean => {
-      if (deadEnds.has(nodeId)) return true;
+    const isDeadEnd = (nodeId: string, path: Set<string>): boolean => {
+      if (deadEndCache.has(nodeId)) return deadEndCache.get(nodeId)!;
       const node = nodeMap.get(nodeId);
       if (!node) return true;
       if (node.type === 'ending') return false;
+      if (path.has(nodeId)) return true;
 
       const nextIds = this.getNextIds(node);
       if (nextIds.length === 0) return true;
-      return nextIds.every((id) => isDeadEnd(id));
+
+      path.add(nodeId);
+      const result = nextIds.every((id) => isDeadEnd(id, path));
+      path.delete(nodeId);
+
+      deadEndCache.set(nodeId, result);
+      return result;
     };
 
-    const buildTree = (nodeId: string): StoryTreeNode => {
-      if (visited.has(nodeId)) {
-        return { nodeId, type: nodeMap.get(nodeId)?.type || 'action', chapterId: chapterMap.get(nodeId) || '', children: [], isDeadEnd: false };
+    const buildTree = (nodeId: string, depth: number = 0): StoryTreeNode => {
+      if (visited.has(nodeId) || depth > 200) {
+        return {
+          nodeId,
+          type: nodeMap.get(nodeId)?.type || 'action',
+          chapterId: chapterMap.get(nodeId) || '',
+          children: [],
+          isDeadEnd: deadEndCache.get(nodeId) ?? false,
+        };
       }
       visited.add(nodeId);
 
       const node = nodeMap.get(nodeId);
-      const dead = isDeadEnd(nodeId);
-      deadEnds.add(nodeId);
+      const dead = isDeadEnd(nodeId, new Set());
+      deadEndCache.set(nodeId, dead);
 
       const nextIds = node ? this.getNextIds(node) : [];
-      const children = nextIds
-        .filter((id) => !visited.has(id) || deadEnds.has(id))
-        .map((id) => buildTree(id));
+      const children = nextIds.map((id) => buildTree(id, depth + 1));
 
       return {
         nodeId,
@@ -579,58 +694,6 @@ export class NarrativeSDK {
     return buildTree(firstNode.id);
   }
 
-  validateDeadEnds(): Array<{ nodeId: string; chapterId: string; type: string }> {
-    const chapters = this.parser.getChapters();
-    const nodeMap = new Map<string, StoryNode>();
-    const chapterMap = new Map<string, string>();
-    const reachableEndings = new Set<string>();
-
-    for (const chapter of chapters) {
-      for (const node of chapter.nodes) {
-        nodeMap.set(node.id, node);
-        chapterMap.set(node.id, chapter.id);
-      }
-    }
-
-    const findReachableEndings = (nodeId: string, visited: Set<string>): void => {
-      if (visited.has(nodeId)) return;
-      visited.add(nodeId);
-      const node = nodeMap.get(nodeId);
-      if (!node) return;
-      if (node.type === 'ending') {
-        reachableEndings.add(node.id);
-        return;
-      }
-      for (const nextId of this.getNextIds(node)) {
-        findReachableEndings(nextId, visited);
-      }
-    };
-
-    const firstChapter = chapters[0];
-    if (firstChapter?.nodes[0]) {
-      findReachableEndings(firstChapter.nodes[0].id, new Set());
-    }
-
-    const deadEnds: Array<{ nodeId: string; chapterId: string; type: string }> = [];
-    for (const chapter of chapters) {
-      for (const node of chapter.nodes) {
-        if (node.type === 'ending') continue;
-        const nextIds = this.getNextIds(node);
-        if (nextIds.length === 0 && node.type !== 'choice') {
-          deadEnds.push({ nodeId: node.id, chapterId: chapter.id, type: node.type });
-        } else if (node.type === 'choice') {
-          const choiceNode = node as NodeChoice;
-          const available = this.choiceBranch.getAvailableOptions(choiceNode);
-          if (available.every((o) => o.disabled)) {
-            deadEnds.push({ nodeId: node.id, chapterId: chapter.id, type: 'choice (all disabled)' });
-          }
-        }
-      }
-    }
-
-    return deadEnds;
-  }
-
   private getNextIds(node: StoryNode): string[] {
     switch (node.type) {
       case 'dialogue':
@@ -643,13 +706,407 @@ export class NarrativeSDK {
         return [node.node];
       case 'ending':
         return [];
+      case 'puzzle': {
+        const ids = [node.successNext];
+        if (node.failureNext) ids.push(node.failureNext);
+        if (node.cancelNext) ids.push(node.cancelNext);
+        return ids;
+      }
       default:
         return [];
     }
   }
 
+  validateDeep(): ValidationIssue[] {
+    const issues: ValidationIssue[] = [];
+    const chapters = this.parser.getChapters();
+    const nodeMap = new Map<string, StoryNode>();
+    const chapterMap = new Map<string, string>();
+
+    for (const chapter of chapters) {
+      for (const node of chapter.nodes) {
+        nodeMap.set(node.id, node);
+        chapterMap.set(node.id, chapter.id);
+      }
+    }
+
+    for (const chapter of chapters) {
+      for (const node of chapter.nodes) {
+        const nextIds = this.getNodeNextIds(node);
+
+        for (const nextId of nextIds) {
+          if (!nodeMap.has(nextId)) {
+            issues.push({
+              kind: 'broken_link',
+              severity: 'error',
+              message: `节点 "${node.id}" 引用了不存在的节点 "${nextId}"`,
+              chapterId: chapter.id,
+              nodeId: node.id,
+              path: [{ chapterId: chapter.id, nodeId: node.id }],
+            });
+          }
+        }
+
+        if (node.type !== 'ending' && nextIds.length === 0) {
+          issues.push({
+            kind: 'dangling_node',
+            severity: 'warning',
+            message: `节点 "${node.id}" 没有任何后续节点，玩家将无法继续`,
+            chapterId: chapter.id,
+            nodeId: node.id,
+            path: [{ chapterId: chapter.id, nodeId: node.id }],
+          });
+        }
+      }
+    }
+
+    for (const chapter of chapters) {
+      for (const node of chapter.nodes) {
+        if (node.type === 'choice') {
+          const choiceNode = node as NodeChoice;
+          const allDisabled = choiceNode.options.every((opt) =>
+            opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap)
+          );
+
+          if (allDisabled && choiceNode.options.length > 0) {
+            issues.push({
+              kind: 'all_options_disabled',
+              severity: 'error',
+              message: `选择节点 "${node.id}" 的所有选项条件在剧情中均不可满足，玩家将无法继续`,
+              chapterId: chapter.id,
+              nodeId: node.id,
+              path: [
+                { chapterId: chapter.id, nodeId: node.id },
+                ...choiceNode.options.map((opt, i) => ({
+                  chapterId: chapter.id,
+                  nodeId: node.id,
+                  optionIndex: i,
+                  optionText: opt.text,
+                })),
+              ],
+            });
+          }
+
+          for (let i = 0; i < choiceNode.options.length; i++) {
+            const opt = choiceNode.options[i];
+            if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap)) {
+              issues.push({
+                kind: 'unsatisfiable_condition',
+                severity: 'warning',
+                message: `章节 "${chapter.title}" 节点 "${node.id}" 选项 #${i} "${opt.text}" 的条件在剧情中永远不可满足`,
+                chapterId: chapter.id,
+                nodeId: node.id,
+                path: [
+                  { chapterId: chapter.id, nodeId: node.id, optionIndex: i, optionText: opt.text },
+                ],
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const endingIds = new Set(Object.keys(this.parser.getEndings()));
+    const reachability = this.buildReachabilityMap(nodeMap);
+
+    for (const endingId of endingIds) {
+      const endingNode = this.findEndingNode(endingId, chapters);
+      if (!endingNode) continue;
+
+      const startNode = chapters[0]?.nodes[0];
+      const startReachability = startNode ? reachability.get(startNode.id) : undefined;
+
+      const endingReachable = startReachability && startReachability.has(endingId);
+
+      if (!endingReachable) {
+        const chId = chapterMap.get(endingNode.id) || '';
+        issues.push({
+          kind: 'unreachable_ending',
+          severity: 'warning',
+          message: `结局 "${endingId}" 在游戏中不可达，没有任何路径可以到达此结局`,
+          chapterId: chId,
+          nodeId: endingNode.id,
+          path: [],
+        });
+      }
+    }
+
+    const cyclePaths = this.findCycles(nodeMap, chapterMap);
+    for (const cycle of cyclePaths) {
+      const hasExit = this.cycleHasExit(cycle.nodeId, nodeMap);
+      if (!hasExit) {
+        issues.push({
+          kind: 'no_exit_from_loop',
+          severity: 'error',
+          message: `节点 "${cycle.nodeId}" 处于循环中且没有出口，玩家将永远无法到达结局`,
+          chapterId: cycle.chapterId,
+          nodeId: cycle.nodeId,
+          path: cycle.path,
+        });
+      } else {
+        issues.push({
+          kind: 'infinite_loop',
+          severity: 'warning',
+          message: `节点 "${cycle.nodeId}" 处于循环中，需确认条件分支能跳出循环`,
+          chapterId: cycle.chapterId,
+          nodeId: cycle.nodeId,
+          path: cycle.path,
+        });
+      }
+    }
+
+    for (const chapter of chapters) {
+      for (const node of chapter.nodes) {
+        if (node.type === 'choice') {
+          const choiceNode = node as NodeChoice;
+          for (let i = 0; i < choiceNode.options.length; i++) {
+            const opt = choiceNode.options[i];
+            const reachableEndings = reachability.get(opt.next);
+            if (reachableEndings && reachableEndings.size === 0) {
+              issues.push({
+                kind: 'unreachable_ending',
+                severity: 'warning',
+                message: `章节 "${chapter.title}" 节点 "${node.id}" 选项 #${i} "${opt.text}" 路径上没有可达的结局`,
+                chapterId: chapter.id,
+                nodeId: node.id,
+                path: [
+                  { chapterId: chapter.id, nodeId: node.id, optionIndex: i, optionText: opt.text },
+                ],
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  validateDeadEnds(): Array<{ nodeId: string; chapterId: string; type: string }> {
+    const deepIssues = this.validateDeep();
+    return deepIssues
+      .filter((issue) => issue.kind === 'dangling_node' || issue.kind === 'all_options_disabled')
+      .map((issue) => ({
+        nodeId: issue.nodeId,
+        chapterId: issue.chapterId,
+        type: issue.kind,
+      }));
+  }
+
+  private getNodeNextIds(node: StoryNode): string[] {
+    const ids: string[] = [];
+    switch (node.type) {
+      case 'dialogue':
+        if (node.next) ids.push(node.next);
+        break;
+      case 'choice':
+        for (const opt of node.options) ids.push(opt.next);
+        break;
+      case 'action':
+        if (node.next) ids.push(node.next);
+        break;
+      case 'goto':
+        ids.push(node.node);
+        break;
+      case 'puzzle':
+        ids.push(node.successNext);
+        if (node.failureNext) ids.push(node.failureNext);
+        if (node.cancelNext) ids.push(node.cancelNext);
+        break;
+      case 'ending':
+        break;
+    }
+    return ids;
+  }
+
+  private isConditionPossiblySatisfiable(
+    condition: Condition | ConditionGroup,
+    nodeMap: Map<string, StoryNode>
+  ): boolean {
+    if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
+      const group = condition as ConditionGroup;
+      if (group.type === 'and') {
+        return group.conditions.every((c) => this.isConditionPossiblySatisfiable(c, nodeMap));
+      }
+      return group.conditions.some((c) => this.isConditionPossiblySatisfiable(c, nodeMap));
+    }
+
+    const cond = condition as Condition;
+    const varName = cond.var;
+
+    for (const node of nodeMap.values()) {
+      const actions = this.getNodeActions(node);
+      for (const action of actions) {
+        if (action.type === 'setVar' && action.key === varName) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private getNodeActions(node: StoryNode): Action[] {
+    const actions: Action[] = [];
+    switch (node.type) {
+      case 'dialogue':
+        if (node.actions) actions.push(...node.actions);
+        break;
+      case 'choice':
+        for (const opt of node.options) {
+          if (opt.actions) actions.push(...opt.actions);
+        }
+        break;
+      case 'action':
+        actions.push(...node.actions);
+        break;
+      case 'puzzle':
+        if (node.successActions) actions.push(...node.successActions);
+        if (node.failureActions) actions.push(...node.failureActions);
+        if (node.cancelActions) actions.push(...node.cancelActions);
+        break;
+    }
+    return actions;
+  }
+
+  private buildReachabilityMap(nodeMap: Map<string, StoryNode>): Map<string, Set<string>> {
+    const reachability = new Map<string, Set<string>>();
+
+    const compute = (nodeId: string, stack: Set<string>): Set<string> => {
+      if (reachability.has(nodeId)) return reachability.get(nodeId)!;
+      if (stack.has(nodeId)) return new Set<string>();
+
+      stack.add(nodeId);
+      const node = nodeMap.get(nodeId);
+      if (!node) {
+        const empty = new Set<string>();
+        reachability.set(nodeId, empty);
+        return empty;
+      }
+
+      const myEndings = new Set<string>();
+      if (node.type === 'ending') {
+        myEndings.add(node.endingId);
+      }
+
+      for (const nextId of this.getNextIds(node)) {
+        const childEndings = compute(nextId, stack);
+        for (const e of childEndings) myEndings.add(e);
+      }
+
+      reachability.set(nodeId, myEndings);
+      stack.delete(nodeId);
+      return myEndings;
+    };
+
+    for (const nodeId of nodeMap.keys()) {
+      if (!reachability.has(nodeId)) {
+        compute(nodeId, new Set());
+      }
+    }
+
+    return reachability;
+  }
+
+  private findEndingNode(endingId: string, chapters: { nodes: StoryNode[] }[]): StoryNode | undefined {
+    for (const chapter of chapters) {
+      for (const node of chapter.nodes) {
+        if (node.type === 'ending' && (node as { endingId: string }).endingId === endingId) {
+          return node;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private findCycles(
+    nodeMap: Map<string, StoryNode>,
+    chapterMap: Map<string, string>
+  ): Array<{ nodeId: string; chapterId: string; path: ValidationPathStep[] }> {
+    const cycles: Array<{ nodeId: string; chapterId: string; path: ValidationPathStep[] }> = [];
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const color = new Map<string, number>();
+    const pathStack: ValidationPathStep[] = [];
+
+    for (const nodeId of nodeMap.keys()) {
+      color.set(nodeId, WHITE);
+    }
+
+    const dfs = (nodeId: string): void => {
+      color.set(nodeId, GRAY);
+      const node = nodeMap.get(nodeId);
+      if (!node) return;
+
+      pathStack.push({
+        chapterId: chapterMap.get(nodeId) || '',
+        nodeId,
+      });
+
+      const nextIds = this.getNextIds(node);
+      for (const nextId of nextIds) {
+        if (!nodeMap.has(nextId)) continue;
+
+        const nextColor = color.get(nextId);
+        if (nextColor === GRAY) {
+          const cycleStartIdx = pathStack.findIndex((s) => s.nodeId === nextId);
+          if (cycleStartIdx >= 0) {
+            const cyclePath = pathStack.slice(cycleStartIdx);
+            cycles.push({
+              nodeId: nextId,
+              chapterId: chapterMap.get(nextId) || '',
+              path: [...cyclePath],
+            });
+          }
+        } else if (nextColor === WHITE) {
+          const lastStep = pathStack[pathStack.length - 1];
+          if (node.type === 'choice') {
+            const choiceNode = node as NodeChoice;
+            const optIdx = choiceNode.options.findIndex((o) => o.next === nextId);
+            if (optIdx >= 0) {
+              lastStep.optionIndex = optIdx;
+              lastStep.optionText = choiceNode.options[optIdx].text;
+            }
+          }
+          dfs(nextId);
+        }
+      }
+
+      pathStack.pop();
+      color.set(nodeId, BLACK);
+    };
+
+    for (const nodeId of nodeMap.keys()) {
+      if (color.get(nodeId) === WHITE) {
+        dfs(nodeId);
+      }
+    }
+
+    const seen = new Set<string>();
+    return cycles.filter((c) => {
+      const key = c.nodeId;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  private cycleHasExit(cycleNodeId: string, nodeMap: Map<string, StoryNode>): boolean {
+    const node = nodeMap.get(cycleNodeId);
+    if (!node) return false;
+
+    if (node.type === 'choice') {
+      const choiceNode = node as NodeChoice;
+      if (choiceNode.options.length > 1) return true;
+    }
+
+    const nextIds = this.getNextIds(node);
+    return nextIds.length > 1;
+  }
+
   setLocale(locale: string): void {
     this.locale = locale;
+    this.choiceBranch.setLocalizeFn((text: string) => this.localizeText(text));
+    this.dialoguePlayer.setLocalizeFn((text: string) => this.localizeText(text));
     this.logDebug(`Locale changed to: ${locale}`);
   }
 
@@ -689,6 +1146,8 @@ export class NarrativeSDK {
     this.chapterManager.reset(startChapterId);
     this.currentNodeId = '';
     this.state = 'idle';
+    this.pendingPuzzleNodeId = null;
+    this.puzzleResolveCallback = null;
     this.debugLog = [];
     this.logDebug('SDK reset');
   }

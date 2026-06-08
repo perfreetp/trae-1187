@@ -13,6 +13,7 @@ export class ChoiceBranch {
   private choiceHistory: PlayerChoiceRecord[] = [];
   private activeTimer: ReturnType<typeof setTimeout> | null = null;
   private eventHandler?: EventHandler;
+  private localizeFn?: (text: string) => string;
 
   constructor(eventHandler?: EventHandler) {
     this.eventHandler = eventHandler;
@@ -20,6 +21,10 @@ export class ChoiceBranch {
 
   setVariables(variables: Map<string, string | number | boolean>): void {
     this.variables = variables;
+  }
+
+  setLocalizeFn(fn: (text: string) => string): void {
+    this.localizeFn = fn;
   }
 
   evaluateCondition(condition: Condition | ConditionGroup): boolean {
@@ -74,24 +79,31 @@ export class ChoiceBranch {
   selectOption(
     choiceNode: NodeChoice,
     optionIndex: number,
-    chapterId: string
+    chapterId: string,
+    expired: boolean = false
   ): { next: string; actions: ChoiceOption['actions'] } | null {
     const option = choiceNode.options[optionIndex];
     if (!option) return null;
 
-    const conditionMet = !option.condition || this.evaluateCondition(option.condition);
-    if (!conditionMet) return null;
+    if (!expired) {
+      const conditionMet = !option.condition || this.evaluateCondition(option.condition);
+      if (!conditionMet) return null;
+    }
+
+    const localizedText = this.localizeFn ? this.localizeFn(option.text) : undefined;
 
     const record: PlayerChoiceRecord = {
       chapterId,
       nodeId: choiceNode.id,
       optionIndex,
       optionText: option.text,
+      localizedText,
+      expired,
       timestamp: Date.now(),
     };
     this.choiceHistory.push(record);
 
-    this.emit('choice', record);
+    this.emit(expired ? 'choiceExpired' : 'choice', record);
 
     this.clearTimer();
 
@@ -105,7 +117,6 @@ export class ChoiceBranch {
   ): void {
     this.clearTimer();
     this.activeTimer = setTimeout(() => {
-      this.emit('choiceExpired', { defaultOption });
       onExpire(defaultOption);
       this.activeTimer = null;
     }, timelimit * 1000);

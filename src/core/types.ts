@@ -133,7 +133,20 @@ export interface NodeEnding {
   text?: string;
 }
 
-export type StoryNode = NodeDialogue | NodeChoice | NodeAction | NodeGoto | NodeEnding;
+export interface NodePuzzle {
+  id: string;
+  type: 'puzzle';
+  puzzleId: string;
+  params?: Record<string, unknown>;
+  successNext: string;
+  successActions?: Action[];
+  failureNext?: string;
+  failureActions?: Action[];
+  cancelNext?: string;
+  cancelActions?: Action[];
+}
+
+export type StoryNode = NodeDialogue | NodeChoice | NodeAction | NodeGoto | NodeEnding | NodePuzzle;
 
 export interface ChapterDef {
   id: string;
@@ -182,6 +195,7 @@ export interface NarrativeScript {
     version: string;
     language: string;
     languages?: string[];
+    saveVersion?: string;
   };
   characters: Record<string, CharacterDef>;
   chapters: ChapterDef[];
@@ -207,6 +221,8 @@ export interface PlayerChoiceRecord {
   nodeId: string;
   optionIndex: number;
   optionText: string;
+  localizedText?: string;
+  expired: boolean;
   timestamp: number;
 }
 
@@ -220,6 +236,7 @@ export interface AchievementState {
 
 export interface Snapshot {
   version: string;
+  scriptVersion?: string;
   timestamp: number;
   currentChapterId: string;
   currentNodeId: string;
@@ -232,10 +249,17 @@ export interface Snapshot {
   dialogueHistory: DialogueLine[];
 }
 
+export interface LoadResult {
+  success: boolean;
+  error?: 'invalid_json' | 'version_mismatch' | 'structure_corrupted' | 'missing_fields';
+  message?: string;
+}
+
 export interface DialogueLine {
   speaker: string;
   speakerName: string;
   text: string;
+  localizedText?: string;
   avatar?: string;
   tone?: string;
   illustration?: string;
@@ -261,6 +285,7 @@ export type EventType =
   | 'illustration'
   | 'ending'
   | 'puzzle'
+  | 'puzzleResolved'
   | 'error';
 
 export interface NarrativeEvent {
@@ -275,9 +300,11 @@ export interface CharacterRegistration {
   tone?: string;
 }
 
+export type PuzzleResult = 'success' | 'failure' | 'cancel';
+
 export interface PuzzleHandler {
   puzzleId: string;
-  handler: (params?: Record<string, unknown>) => Promise<boolean>;
+  handler: (params?: Record<string, unknown>) => Promise<PuzzleResult>;
 }
 
 export interface StoryTreeNode {
@@ -286,6 +313,33 @@ export interface StoryTreeNode {
   chapterId: string;
   children: StoryTreeNode[];
   isDeadEnd: boolean;
+}
+
+export type ValidationSeverity = 'error' | 'warning';
+
+export type ValidationIssueKind =
+  | 'broken_link'
+  | 'unreachable_ending'
+  | 'infinite_loop'
+  | 'unsatisfiable_condition'
+  | 'all_options_disabled'
+  | 'no_exit_from_loop'
+  | 'dangling_node';
+
+export interface ValidationPathStep {
+  chapterId: string;
+  nodeId: string;
+  optionIndex?: number;
+  optionText?: string;
+}
+
+export interface ValidationIssue {
+  kind: ValidationIssueKind;
+  severity: ValidationSeverity;
+  message: string;
+  chapterId: string;
+  nodeId: string;
+  path: ValidationPathStep[];
 }
 
 export interface SDKConfig {
