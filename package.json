@@ -1,0 +1,29 @@
+{
+  "name": "narrative-sdk",
+  "version": "1.0.0",
+  "description": "Text adventure narrative SDK for indie game developers - branching stories, chapters, dialogue, choices, variables, inventory, quests, save/load",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "narrative",
+    "text-adventure",
+    "visual-novel",
+    "branching-story",
+    "game-sdk",
+    "dialogue",
+    "choice",
+    "indie-game"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}
