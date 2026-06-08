@@ -24,6 +24,7 @@ export class SaveLoad {
   private visitedNodes: Set<string> = new Set();
   private achievements: Map<string, AchievementState> = new Map();
   private scriptVersion?: string;
+  private snapshotValidator?: (snapshot: Snapshot) => LoadResult | null;
 
   constructor(
     variableCondition: VariableCondition,
@@ -32,7 +33,8 @@ export class SaveLoad {
     dialoguePlayer: DialoguePlayer,
     choiceBranch: ChoiceBranch,
     chapterManager: ChapterManager,
-    scriptVersion?: string
+    scriptVersion?: string,
+    snapshotValidator?: (snapshot: Snapshot) => LoadResult | null
   ) {
     this.variableCondition = variableCondition;
     this.inventory = inventory;
@@ -41,10 +43,11 @@ export class SaveLoad {
     this.choiceBranch = choiceBranch;
     this.chapterManager = chapterManager;
     this.scriptVersion = scriptVersion;
+    this.snapshotValidator = snapshotValidator;
   }
 
-  createSnapshot(currentNodeId: string): Snapshot {
-    return {
+  createSnapshot(currentNodeId: string, pendingState?: string, pendingPuzzleNodeId?: string | null): Snapshot {
+    const snapshot: Snapshot = {
       version: SAVE_VERSION,
       scriptVersion: this.scriptVersion,
       timestamp: Date.now(),
@@ -58,11 +61,23 @@ export class SaveLoad {
       visitedNodes: Array.from(this.visitedNodes),
       dialogueHistory: this.dialoguePlayer.getHistory(),
     };
+    if (pendingState) {
+      snapshot.pendingState = pendingState as 'waiting_choice' | 'waiting_puzzle' | 'ended';
+    }
+    if (pendingPuzzleNodeId) {
+      snapshot.pendingPuzzleNodeId = pendingPuzzleNodeId;
+    }
+    return snapshot;
   }
 
   restoreSnapshot(snapshot: Snapshot): LoadResult {
     const validation = this.validateSnapshot(snapshot);
     if (!validation.success) return validation;
+
+    if (this.snapshotValidator) {
+      const extResult = this.snapshotValidator(snapshot);
+      if (extResult && !extResult.success) return extResult;
+    }
 
     const backup = this.createBackup();
 
@@ -252,8 +267,8 @@ export class SaveLoad {
     return this.achievements.get(id);
   }
 
-  serialize(currentNodeId: string): string {
-    return JSON.stringify(this.createSnapshot(currentNodeId));
+  serialize(currentNodeId: string, pendingState?: string, pendingPuzzleNodeId?: string | null): string {
+    return JSON.stringify(this.createSnapshot(currentNodeId, pendingState, pendingPuzzleNodeId));
   }
 
   deserialize(json: string): LoadResult {

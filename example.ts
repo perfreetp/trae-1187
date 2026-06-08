@@ -346,103 +346,81 @@ const script: NarrativeScript = {
   },
 };
 
-const sdk = new NarrativeSDK({
-  script,
-  locale: 'zh-CN',
-  debug: true,
-  onEvent: (event: NarrativeEvent) => {
-    switch (event.type) {
-      case 'dialogue': {
-        const line = event.data as DialogueLine;
-        const displayText = line.localizedText || line.text;
-        const avatarTag = line.avatar ? `[${line.avatar}] ` : '';
-        const toneTag = line.tone ? `<${line.tone}> ` : '';
-        console.log(`📖 ${avatarTag}${toneTag}${line.speakerName}: ${displayText}`);
-        break;
-      }
-      case 'choice': {
-        const choiceData = event.data as { nodeId: string; options: Array<{ text: string; disabled: boolean; index: number }>; timelimit?: number };
-        console.log('\n🔀 请选择:');
-        choiceData.options.forEach((opt) => {
-          const disabled = opt.disabled ? ' [不可选]' : '';
-          console.log(`  ${opt.index + 1}. ${opt.text}${disabled}`);
-        });
-        if (choiceData.timelimit) {
-          console.log(`  ⏱️ 限时 ${choiceData.timelimit} 秒`);
+function createSDK(): NarrativeSDK {
+  return new NarrativeSDK({
+    script,
+    locale: 'zh-CN',
+    debug: true,
+    onEvent: (event: NarrativeEvent) => {
+      switch (event.type) {
+        case 'dialogue': {
+          const line = event.data as DialogueLine;
+          const displayText = line.localizedText || line.text;
+          const avatarTag = line.avatar ? `[${line.avatar}] ` : '';
+          const toneTag = line.tone ? `<${line.tone}> ` : '';
+          console.log(`📖 ${avatarTag}${toneTag}${line.speakerName}: ${displayText}`);
+          break;
         }
-        break;
+        case 'choice': {
+          const choiceData = event.data as { nodeId: string; options: Array<{ text: string; disabled: boolean; index: number }>; timelimit?: number };
+          console.log('\n🔀 请选择:');
+          choiceData.options.forEach((opt) => {
+            const disabled = opt.disabled ? ' [不可选]' : '';
+            console.log(`  ${opt.index + 1}. ${opt.text}${disabled}`);
+          });
+          if (choiceData.timelimit) {
+            console.log(`  ⏱️ 限时 ${choiceData.timelimit} 秒`);
+          }
+          break;
+        }
+        case 'choiceExpired':
+          console.log('⏱️ 选择时间已到，自动选择默认选项！');
+          break;
+        case 'sound':
+          console.log(`🔊 音效: ${(event.data as { soundId: string }).soundId}`);
+          break;
+        case 'illustration':
+          console.log(`🖼️ 插图: ${(event.data as { illustrationId: string }).illustrationId}`);
+          break;
+        case 'itemAdd':
+          console.log(`🎒 获得物品: ${(event.data as { itemId: string }).itemId}`);
+          break;
+        case 'questStart':
+          console.log(`📜 任务开始: ${(event.data as { questId: string }).questId}`);
+          break;
+        case 'objectiveComplete':
+          console.log(`✅ 目标达成`);
+          break;
+        case 'chapterChange':
+          console.log(`📚 章节切换: ${(event.data as { chapterId: string }).chapterId}`);
+          break;
+        case 'ending': {
+          const ed = event.data as { endingId: string; name: string; text?: string };
+          console.log(`\n🏁 结局: ${ed.name}`);
+          if (ed.text) console.log(`   ${ed.text}`);
+          break;
+        }
+        case 'puzzle': {
+          const pd = event.data as { nodeId: string; puzzleId: string; params?: Record<string, unknown> };
+          console.log(`🧩 谜题触发: ${pd.puzzleId} (节点: ${pd.nodeId})`);
+          break;
+        }
+        case 'puzzleResolved': {
+          const pr = event.data as { puzzleId: string; result: PuzzleResult; nextNodeId: string | null };
+          console.log(`🧩 谜题结果: ${pr.result} → 下一个节点: ${pr.nextNodeId || '无'}`);
+          break;
+        }
+        case 'error': {
+          const err = event.data as { message?: string; error?: string; detail?: string };
+          console.log(`❌ 错误: ${err.message || ''} ${err.detail || ''}`);
+          break;
+        }
       }
-      case 'choiceExpired':
-        console.log('⏱️ 选择时间已到，自动选择默认选项！');
-        break;
-      case 'sound':
-        console.log(`� 音效: ${(event.data as { soundId: string }).soundId}`);
-        break;
-      case 'illustration':
-        console.log(`🖼️ 插图: ${(event.data as { illustrationId: string }).illustrationId}`);
-        break;
-      case 'itemAdd':
-        console.log(`🎒 获得物品: ${(event.data as { itemId: string }).itemId}`);
-        break;
-      case 'questStart':
-        console.log(`📜 任务开始: ${(event.data as { questId: string }).questId}`);
-        break;
-      case 'questComplete':
-        console.log(`📜 任务完成!`);
-        break;
-      case 'objectiveComplete':
-        console.log(`✅ 目标达成`);
-        break;
-      case 'chapterChange':
-        console.log(`📚 章节切换: ${(event.data as { chapterId: string }).chapterId}`);
-        break;
-      case 'ending': {
-        const ed = event.data as { endingId: string; name: string; text?: string };
-        console.log(`\n🏁 结局: ${ed.name}`);
-        if (ed.text) console.log(`   ${ed.text}`);
-        break;
-      }
-      case 'puzzle': {
-        const pd = event.data as { nodeId: string; puzzleId: string; params?: Record<string, unknown> };
-        console.log(`🧩 谜题触发: ${pd.puzzleId} (节点: ${pd.nodeId})`);
-        console.log(`   状态: 等待游戏侧回传结果 (success/failure/cancel)`);
-        break;
-      }
-      case 'puzzleResolved': {
-        const pr = event.data as { puzzleId: string; result: PuzzleResult; nextNodeId: string | null };
-        console.log(`🧩 谜题结果: ${pr.result} → 下一个节点: ${pr.nextNodeId || '无'}`);
-        break;
-      }
-      case 'error': {
-        const err = event.data as { message?: string; error?: string; detail?: string };
-        console.log(`❌ 错误: ${err.message || ''} ${err.detail || ''}`);
-        break;
-      }
-    }
-  },
-});
-
-sdk.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
-sdk.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
-
-sdk.injectPuzzle({
-  puzzleId: 'rune_gate',
-  handler: async (params) => {
-    console.log(`   🧩 [自定义谜题] 符文之门 - 难度: ${(params as { difficulty: string }).difficulty}`);
-    console.log(`   🎮 游戏侧调用 resolvePuzzle('success'|'failure'|'cancel') 继续`);
-    return 'success' as PuzzleResult;
-  },
-});
-
-console.log('=== 迷雾森林 - 文字冒险 SDK v2 演示 ===\n');
-
-const firstLine = sdk.start();
-if (!firstLine) {
-  console.log('启动失败！');
-  process.exit(1);
+    },
+  });
 }
 
-function advance(): DialogueLine | null {
+function advance(sdk: NarrativeSDK): DialogueLine | null {
   let line = sdk.continue();
   while (line) {
     if (sdk.getState() === 'waiting_choice' || sdk.getState() === 'waiting_puzzle' || sdk.getState() === 'ended') break;
@@ -451,49 +429,243 @@ function advance(): DialogueLine | null {
   return line;
 }
 
+console.log('=== 迷雾森林 - 文字冒险 SDK v3 演示 ===\n');
+
+const sdk = createSDK();
+
+sdk.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
+sdk.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
+
+sdk.injectPuzzle({
+  puzzleId: 'rune_gate',
+  handler: async (params) => {
+    console.log(`   🧩 [自定义谜题] 符文之门 - 难度: ${(params as { difficulty: string }).difficulty}`);
+    return 'success' as PuzzleResult;
+  },
+});
+
+const firstLine = sdk.start();
+if (!firstLine) {
+  console.log('启动失败！');
+  process.exit(1);
+}
+
 console.log('\n--- 继续推进到第一个选择 ---');
-advance();
+advance(sdk);
 
 if (sdk.getState() === 'waiting_choice') {
   console.log('\n--- 玩家选择: 转身面对身后的注视 ---');
   sdk.makeChoice('first_choice', 1);
-  advance();
+  advance(sdk);
 }
 
 if (sdk.getState() === 'waiting_puzzle') {
   console.log('\n--- 谜题节点触发，SDK 暂停等待结果 ---');
   console.log(`   SDK 状态: ${sdk.getState()}`);
   console.log(`   当前节点: ${sdk.getCurrentNodeId()}`);
-
   console.log('\n--- 游戏侧回传 resolvePuzzle("success") ---');
   sdk.resolvePuzzle('success');
-  advance();
+  advance(sdk);
 }
 
 if (sdk.getState() === 'waiting_choice') {
   const currentNodeId = sdk.getCurrentNodeId();
   console.log(`\n--- 玩家选择: 询问更多关于暗影的事 ---`);
   sdk.makeChoice(currentNodeId, 1);
-  advance();
+  advance(sdk);
 }
 
 if (sdk.getState() === 'waiting_choice') {
   const currentNodeId = sdk.getCurrentNodeId();
   console.log(`\n--- 玩家选择: 接受地图，踏上旅途 ---`);
   sdk.makeChoice(currentNodeId, 0);
-  advance();
+  advance(sdk);
 }
 
 console.log('\n=== SDK 状态查询 ===');
 console.log(`当前章节: ${sdk.getCurrentChapterId()} - ${sdk.getCurrentChapterTitle()}`);
 console.log(`当前节点: ${sdk.getCurrentNodeId()}`);
 console.log(`SDK 状态: ${sdk.getState()}`);
-console.log(`背包物品: ${JSON.stringify(sdk.getInventory())}`);
-console.log(`变量: ${JSON.stringify(sdk.getVariableCondition().getAll())}`);
-console.log(`活跃任务: ${JSON.stringify(sdk.getActiveQuests())}`);
-console.log(`结局检查: ${JSON.stringify(sdk.checkEndingConditions())}`);
 
-console.log('\n=== 存档/读档测试 ===');
+// ===== TEST 1: Save/Load at puzzle pause point =====
+console.log('\n=== 测试1: 谜题暂停点保存/加载 ===');
+
+const sdk2 = createSDK();
+sdk2.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
+sdk2.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
+
+sdk2.start();
+advance(sdk2);
+sdk2.makeChoice('first_choice', 1);
+advance(sdk2);
+
+console.log(`保存前状态: ${sdk2.getState()}, 节点: ${sdk2.getCurrentNodeId()}`);
+const puzzleSnapshot = sdk2.save();
+const puzzleStr = sdk2.saveToString();
+console.log(`存档 pendingState: ${puzzleSnapshot.pendingState}`);
+console.log(`存档 pendingPuzzleNodeId: ${puzzleSnapshot.pendingPuzzleNodeId}`);
+
+sdk2.reset('ch1');
+console.log(`重置后状态: ${sdk2.getState()}`);
+
+const loadResult1 = sdk2.load(puzzleSnapshot);
+console.log(`加载后状态: ${sdk2.getState()}, 节点: ${sdk2.getCurrentNodeId()}`);
+console.log(`加载后 pendingPuzzleNodeId: ${(sdk2 as any).pendingPuzzleNodeId}`);
+
+if (sdk2.getState() === 'waiting_puzzle') {
+  console.log('\n--- 从谜题暂停存档恢复后，回传 resolvePuzzle("failure") ---');
+  sdk2.resolvePuzzle('failure');
+  advance(sdk2);
+  console.log(`failure 分支后状态: ${sdk2.getState()}, 节点: ${sdk2.getCurrentNodeId()}`);
+}
+
+// Test load from string at puzzle pause
+sdk2.reset('ch1');
+const loadResult2 = sdk2.loadFromString(puzzleStr);
+console.log(`从字符串加载后状态: ${sdk2.getState()}, 节点: ${sdk2.getCurrentNodeId()}`);
+
+if (sdk2.getState() === 'waiting_puzzle') {
+  console.log('--- 从字符串恢复后，回传 resolvePuzzle("cancel") ---');
+  sdk2.resolvePuzzle('cancel');
+  advance(sdk2);
+  console.log(`cancel 分支后状态: ${sdk2.getState()}, 节点: ${sdk2.getCurrentNodeId()}`);
+}
+
+// ===== TEST 2: Save/Load at choice pause point =====
+console.log('\n=== 测试2: 选择暂停点保存/加载 ===');
+
+const sdk3 = createSDK();
+sdk3.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
+sdk3.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
+
+sdk3.start();
+advance(sdk3);
+
+if (sdk3.getState() === 'waiting_choice') {
+  console.log(`保存前状态: ${sdk3.getState()}, 节点: ${sdk3.getCurrentNodeId()}`);
+  const choiceSnapshot = sdk3.save();
+  console.log(`存档 pendingState: ${choiceSnapshot.pendingState}`);
+
+  sdk3.reset('ch1');
+  sdk3.load(choiceSnapshot);
+  console.log(`加载后状态: ${sdk3.getState()}, 节点: ${sdk3.getCurrentNodeId()}`);
+  console.log(`加载后可以继续选择: ${sdk3.getState() === 'waiting_choice'}`);
+
+  sdk3.makeChoice('first_choice', 1);
+  advance(sdk3);
+  console.log(`选择后状态: ${sdk3.getState()}`);
+}
+
+// ===== TEST 3: Save/Load at ending =====
+console.log('\n=== 测试3: 结局暂停点保存/加载 ===');
+
+const sdk4 = createSDK();
+sdk4.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
+sdk4.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
+sdk4.injectPuzzle({
+  puzzleId: 'rune_gate',
+  handler: async () => 'success',
+});
+
+sdk4.start();
+advance(sdk4);
+sdk4.makeChoice('first_choice', 1);
+advance(sdk4);
+if (sdk4.getState() === 'waiting_puzzle') {
+  sdk4.resolvePuzzle('success');
+  advance(sdk4);
+}
+if (sdk4.getState() === 'waiting_choice') {
+  sdk4.makeChoice(sdk4.getCurrentNodeId(), 0);
+  advance(sdk4);
+}
+if (sdk4.getState() === 'waiting_choice') {
+  sdk4.makeChoice(sdk4.getCurrentNodeId(), 0);
+  advance(sdk4);
+}
+
+console.log(`结局前状态: ${sdk4.getState()}, 节点: ${sdk4.getCurrentNodeId()}`);
+if (sdk4.getState() === 'ended') {
+  const endedSnapshot = sdk4.save();
+  console.log(`结局存档 pendingState: ${endedSnapshot.pendingState}`);
+  sdk4.reset('ch1');
+  sdk4.load(endedSnapshot);
+  console.log(`结局加载后状态: ${sdk4.getState()}`);
+}
+
+// ===== TEST 4: Load validation - missing chapter/node, state mismatch =====
+console.log('\n=== 测试4: 加载校验 - 不存在的章节/节点、状态不匹配 ===');
+
+const validSnap = sdk.save();
+
+const badChapterSnap = { ...validSnap, currentChapterId: 'nonexistent_chapter' };
+const badChapterResult = sdk.load(badChapterSnap);
+console.log(`不存在章节加载: success=${badChapterResult.success}, error=${badChapterResult.error}`);
+console.log(`加载失败后状态未被改乱: 章节=${sdk.getCurrentChapterId()}, 状态=${sdk.getState()}`);
+
+const badNodeSnap = { ...validSnap, currentNodeId: 'nonexistent_node' };
+const badNodeResult = sdk.load(badNodeSnap);
+console.log(`不存在节点加载: success=${badNodeResult.success}, error=${badNodeResult.error}`);
+
+const mismatchSnap = { ...validSnap, pendingState: 'waiting_puzzle' as const, currentNodeId: 'first_choice' };
+const mismatchResult = sdk.load(mismatchSnap);
+console.log(`状态不匹配(puzzle vs choice): success=${mismatchResult.success}, error=${mismatchResult.error}`);
+
+const mismatchSnap2 = { ...validSnap, pendingState: 'waiting_choice' as const, currentNodeId: sdk.getCurrentNodeId() };
+const mismatchResult2 = sdk.load(mismatchSnap2);
+console.log(`状态不匹配(choice vs ending): success=${mismatchResult2.success}, error=${mismatchResult2.error}`);
+
+// ===== TEST 5: i18n round-trip in choice history =====
+console.log('\n=== 测试5: 多语言选择记录往返 ===');
+
+const sdk5 = createSDK();
+sdk5.registerCharacter('elf', { avatar: 'elf_face', tone: 'mysterious' });
+sdk5.registerCharacter('merchant', { avatar: 'merchant_face', tone: 'friendly' });
+sdk5.injectPuzzle({
+  puzzleId: 'rune_gate',
+  handler: async () => 'success',
+});
+
+sdk5.start();
+advance(sdk5);
+
+sdk5.makeChoice('first_choice', 1);
+advance(sdk5);
+
+if (sdk5.getState() === 'waiting_puzzle') {
+  sdk5.resolvePuzzle('success');
+  advance(sdk5);
+}
+
+if (sdk5.getState() === 'waiting_choice') {
+  sdk5.makeChoice(sdk5.getCurrentNodeId(), 0);
+  advance(sdk5);
+}
+
+console.log('\n--- 中文下的选择记录 ---');
+sdk5.setLocale('zh-CN');
+let history5 = sdk5.getChoiceHistory();
+history5.forEach((rec, i) => {
+  console.log(`  #${i + 1}: 原文="${rec.optionText}", 本地化="${rec.localizedText}"`);
+});
+
+console.log('\n--- 切换到英文后的选择记录 ---');
+sdk5.setLocale('en-US');
+history5 = sdk5.getChoiceHistory();
+history5.forEach((rec, i) => {
+  console.log(`  #${i + 1}: 原文="${rec.optionText}", 本地化="${rec.localizedText}"`);
+});
+
+console.log('\n--- 切换回中文后的选择记录 ---');
+sdk5.setLocale('zh-CN');
+history5 = sdk5.getChoiceHistory();
+history5.forEach((rec, i) => {
+  console.log(`  #${i + 1}: 原文="${rec.optionText}", 本地化="${rec.localizedText}"`);
+});
+
+// ===== TEST 6: Normal save/load consistency =====
+console.log('\n=== 测试6: 正常存档/读档一致性 ===');
+
 const savedSnapshot = sdk.save();
 console.log(`存档时间: ${new Date(savedSnapshot.timestamp).toLocaleString()}`);
 console.log(`存档版本: ${savedSnapshot.version}`);
@@ -501,50 +673,36 @@ console.log(`存档变量数: ${Object.keys(savedSnapshot.variables).length}`);
 console.log(`存档物品数: ${savedSnapshot.inventory.length}`);
 console.log(`存档选择记录: ${savedSnapshot.choiceHistory.length}`);
 console.log(`存档对话历史: ${savedSnapshot.dialogueHistory.length}`);
-console.log(`存档成就: ${savedSnapshot.achievements.length}`);
 
 const serialized = sdk.saveToString();
 console.log(`序列化长度: ${serialized.length} 字符`);
 
 console.log('\n--- 测试加载正常存档 ---');
 sdk.reset('ch1');
-const loadResult = sdk.load(savedSnapshot);
-console.log(`加载结果: success=${loadResult.success}`);
+const normalLoadResult = sdk.load(savedSnapshot);
+console.log(`加载结果: success=${normalLoadResult.success}`);
 console.log(`加载后章节: ${sdk.getCurrentChapterId()}, 节点: ${sdk.getCurrentNodeId()}`);
+console.log(`加载后变量: ${JSON.stringify(sdk.getVariableCondition().getAll())}`);
+console.log(`加载后物品数: ${sdk.getInventory().length}`);
+console.log(`加载后选择记录: ${sdk.getChoiceHistory().length}`);
+console.log(`加载后对话历史: ${sdk.getDialogueHistory().length}`);
 
 console.log('\n--- 测试加载损坏存档 ---');
-const badLoadResult = sdk.loadFromString('{invalid json');
-console.log(`损坏JSON加载: success=${badLoadResult.success}, error=${badLoadResult.error}, message=${badLoadResult.message}`);
+const badJsonResult = sdk.loadFromString('{invalid json');
+console.log(`损坏JSON: success=${badJsonResult.success}, error=${badJsonResult.error}`);
 
 const badVersionResult = sdk.load({ ...savedSnapshot, version: '99.0.0' });
-console.log(`版本不匹配加载: success=${badVersionResult.success}, error=${badVersionResult.error}, message=${badVersionResult.message}`);
+console.log(`版本不匹配: success=${badVersionResult.success}, error=${badVersionResult.error}`);
 
 const missingFieldsResult = sdk.load({ ...savedSnapshot, currentChapterId: '' });
-console.log(`缺字段加载: success=${missingFieldsResult.success}, error=${missingFieldsResult.error}`);
+console.log(`缺字段: success=${missingFieldsResult.success}, error=${missingFieldsResult.error}`);
 
 console.log('\n--- 确认加载失败后运行状态未改乱 ---');
 console.log(`当前章节: ${sdk.getCurrentChapterId()}, 状态: ${sdk.getState()}`);
 
-console.log('\n=== 多语言测试 ===');
-console.log(`当前语言: ${sdk.getLocale()}`);
-console.log(`章节标题(zh-CN): ${sdk.getCurrentChapterTitle()}`);
+// ===== TEST 7: Deep validation =====
+console.log('\n=== 测试7: 深度剧情校验 ===');
 
-sdk.setLocale('en-US');
-console.log(`切换后语言: ${sdk.getLocale()}`);
-console.log(`章节标题(en-US): ${sdk.getCurrentChapterTitle()}`);
-console.log(`物品(en-US): ${JSON.stringify(sdk.getInventory())}`);
-console.log(`任务(en-US): ${JSON.stringify(sdk.getActiveQuests())}`);
-console.log(`结局(en-US): ${JSON.stringify(sdk.checkEndingConditions())}`);
-
-console.log('\n--- 选择记录含本地化文本 ---');
-const choiceHistory = sdk.getChoiceHistory();
-choiceHistory.forEach((rec, i) => {
-  console.log(`  #${i + 1}: ${rec.optionText}${rec.localizedText ? ` → [${rec.localizedText}]` : ''}${rec.expired ? ' (超时)' : ''}`);
-});
-
-sdk.setLocale('zh-CN');
-
-console.log('\n=== 深度剧情校验 ===');
 const issues = sdk.validateDeep();
 if (issues.length === 0) {
   console.log('✅ 未发现剧情问题');
@@ -565,6 +723,61 @@ if (issues.length === 0) {
   }
 }
 
+// ===== TEST 8: Deep validation with problematic script =====
+console.log('\n=== 测试8: 问题脚本深度校验 ===');
+
+const problematicScript: NarrativeScript = {
+  meta: { title: '问题测试', version: '1.0.0', language: 'zh-CN', saveVersion: '1.0.0' },
+  characters: {},
+  chapters: [
+    {
+      id: 'test_ch',
+      title: '测试章节',
+      nodes: [
+        { id: 't_start', type: 'dialogue', speaker: 'narrator', text: '开始', next: 't_choice1' },
+        {
+          id: 't_choice1',
+          type: 'choice',
+          options: [
+            { text: '选项A - 永远到不了结局', next: 't_loop_a', condition: { var: 'flag_a', op: '==', value: true } },
+            { text: '选项B - 值域不可能', next: 't_loop_a', condition: { var: 'score', op: '>', value: 100 } },
+            { text: '选项C - 正常', next: 't_loop_a' },
+          ],
+        },
+        { id: 't_loop_a', type: 'dialogue', speaker: 'narrator', text: '循环A', next: 't_loop_b' },
+        { id: 't_loop_b', type: 'dialogue', speaker: 'narrator', text: '循环B', next: 't_loop_a' },
+      ],
+    },
+  ],
+  items: {},
+  quests: {},
+  endings: {
+    test_end: { id: 'test_end', name: '测试结局' },
+  },
+};
+
+const problematicSDK = new NarrativeSDK({ script: problematicScript, debug: false });
+const problemIssues = problematicSDK.validateDeep();
+if (problemIssues.length === 0) {
+  console.log('✅ 未发现问题（可能脚本确实无问题）');
+} else {
+  for (const issue of problemIssues) {
+    const icon = issue.severity === 'error' ? '🔴' : '🟡';
+    console.log(`${icon} [${issue.kind}] ${issue.message}`);
+    if (issue.path.length > 0) {
+      const pathStr = issue.path.map((step) => {
+        let s = `${step.chapterId}/${step.nodeId}`;
+        if (step.optionIndex !== undefined) {
+          s += ` 选项#${step.optionIndex}${step.optionText ? ` "${step.optionText}"` : ''}`;
+        }
+        return s;
+      }).join(' → ');
+      console.log(`   路径: ${pathStr}`);
+    }
+  }
+}
+
+// ===== STORY TREE & ROLLBACK =====
 console.log('\n=== 剧情树预览 ===');
 const tree = sdk.previewStoryTree();
 function printTree(node: typeof tree, indent: string = ''): void {
@@ -594,4 +807,4 @@ logs.slice(-5).forEach((log) => {
   console.log(`  [${log.level}] ${log.message}`);
 });
 
-console.log('\n✅ SDK v2 演示完成');
+console.log('\n✅ SDK v3 演示完成');

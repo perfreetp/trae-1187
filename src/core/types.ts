@@ -240,6 +240,8 @@ export interface Snapshot {
   timestamp: number;
   currentChapterId: string;
   currentNodeId: string;
+  pendingState?: 'waiting_choice' | 'waiting_puzzle' | 'ended';
+  pendingPuzzleNodeId?: string;
   variables: Record<string, string | number | boolean>;
   inventory: InventoryEntry[];
   quests: QuestState[];
@@ -251,7 +253,7 @@ export interface Snapshot {
 
 export interface LoadResult {
   success: boolean;
-  error?: 'invalid_json' | 'version_mismatch' | 'structure_corrupted' | 'missing_fields';
+  error?: 'invalid_json' | 'version_mismatch' | 'structure_corrupted' | 'missing_fields' | 'invalid_state';
   message?: string;
 }
 

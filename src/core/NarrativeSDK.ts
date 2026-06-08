@@ -90,7 +90,8 @@ export class NarrativeSDK {
       this.dialoguePlayer,
       this.choiceBranch,
       this.chapterManager,
-      script.meta.saveVersion
+      script.meta.saveVersion,
+      (snapshot) => this.validateSnapshotAgainstScript(snapshot)
     );
   }
 
@@ -583,8 +584,77 @@ export class NarrativeSDK {
     }));
   }
 
+  private validateSnapshotAgainstScript(snapshot: Snapshot): LoadResult | null {
+    const chapter = this.parser.getChapter(snapshot.currentChapterId);
+    if (!chapter) {
+      return {
+        success: false,
+        error: 'invalid_state',
+        message: `Chapter "${snapshot.currentChapterId}" does not exist in the current script`,
+      };
+    }
+
+    const node = this.parser.getNode(snapshot.currentNodeId);
+    if (!node) {
+      return {
+        success: false,
+        error: 'invalid_state',
+        message: `Node "${snapshot.currentNodeId}" does not exist in the current script`,
+      };
+    }
+
+    if (snapshot.pendingState === 'waiting_puzzle') {
+      if (node.type !== 'puzzle') {
+        return {
+          success: false,
+          error: 'invalid_state',
+          message: `Save expects puzzle node but "${snapshot.currentNodeId}" is type "${node.type}"`,
+        };
+      }
+      if (snapshot.pendingPuzzleNodeId && snapshot.pendingPuzzleNodeId !== snapshot.currentNodeId) {
+        const puzzleNode = this.parser.getNode(snapshot.pendingPuzzleNodeId);
+        if (!puzzleNode || puzzleNode.type !== 'puzzle') {
+          return {
+            success: false,
+            error: 'invalid_state',
+            message: `Pending puzzle node "${snapshot.pendingPuzzleNodeId}" does not exist or is not a puzzle node`,
+          };
+        }
+      }
+    }
+
+    if (snapshot.pendingState === 'waiting_choice') {
+      if (node.type !== 'choice') {
+        return {
+          success: false,
+          error: 'invalid_state',
+          message: `Save expects choice node but "${snapshot.currentNodeId}" is type "${node.type}"`,
+        };
+      }
+    }
+
+    if (snapshot.pendingState === 'ended') {
+      if (node.type !== 'ending') {
+        return {
+          success: false,
+          error: 'invalid_state',
+          message: `Save expects ending node but "${snapshot.currentNodeId}" is type "${node.type}"`,
+        };
+      }
+    }
+
+    return null;
+  }
+
   save(): Snapshot {
-    const snapshot = this.saveLoad.createSnapshot(this.currentNodeId);
+    const pendingState = (this.state === 'waiting_choice' || this.state === 'waiting_puzzle' || this.state === 'ended')
+      ? this.state
+      : undefined;
+    const snapshot = this.saveLoad.createSnapshot(
+      this.currentNodeId,
+      pendingState,
+      this.pendingPuzzleNodeId
+    );
     this.logDebug('Game saved');
     return snapshot;
   }
@@ -593,8 +663,19 @@ export class NarrativeSDK {
     const result = this.saveLoad.restoreSnapshot(snapshot);
     if (result.success) {
       this.currentNodeId = snapshot.currentNodeId;
-      this.state = 'running';
-      this.logDebug('Game loaded');
+      this.pendingPuzzleNodeId = snapshot.pendingPuzzleNodeId || null;
+
+      if (snapshot.pendingState === 'waiting_choice') {
+        this.state = 'waiting_choice';
+      } else if (snapshot.pendingState === 'waiting_puzzle') {
+        this.state = 'waiting_puzzle';
+      } else if (snapshot.pendingState === 'ended') {
+        this.state = 'ended';
+      } else {
+        this.state = 'running';
+      }
+
+      this.logDebug('Game loaded', { state: this.state, nodeId: this.currentNodeId });
     } else {
       this.logError('Game load failed', result);
       this.emit('error', { message: 'Load failed', error: result.error, detail: result.message });
@@ -603,16 +684,30 @@ export class NarrativeSDK {
   }
 
   saveToString(): string {
-    return this.saveLoad.serialize(this.currentNodeId);
+    const pendingState = (this.state === 'waiting_choice' || this.state === 'waiting_puzzle' || this.state === 'ended')
+      ? this.state
+      : undefined;
+    return this.saveLoad.serialize(this.currentNodeId, pendingState, this.pendingPuzzleNodeId);
   }
 
   loadFromString(json: string): LoadResult {
     const result = this.saveLoad.deserialize(json);
     if (result.success) {
-      const nodeId = this.saveLoad.getCurrentNodeId(json);
-      this.currentNodeId = nodeId || '';
-      this.state = 'running';
-      this.logDebug('Game loaded from string');
+      const parsed = JSON.parse(json) as Snapshot;
+      this.currentNodeId = parsed.currentNodeId;
+      this.pendingPuzzleNodeId = parsed.pendingPuzzleNodeId || null;
+
+      if (parsed.pendingState === 'waiting_choice') {
+        this.state = 'waiting_choice';
+      } else if (parsed.pendingState === 'waiting_puzzle') {
+        this.state = 'waiting_puzzle';
+      } else if (parsed.pendingState === 'ended') {
+        this.state = 'ended';
+      } else {
+        this.state = 'running';
+      }
+
+      this.logDebug('Game loaded from string', { state: this.state, nodeId: this.currentNodeId });
     } else {
       this.logError('Game load from string failed', result);
       this.emit('error', { message: 'Load from string failed', error: result.error, detail: result.message });
@@ -765,7 +860,7 @@ export class NarrativeSDK {
         if (node.type === 'choice') {
           const choiceNode = node as NodeChoice;
           const allDisabled = choiceNode.options.every((opt) =>
-            opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap)
+            opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node)
           );
 
           if (allDisabled && choiceNode.options.length > 0) {
@@ -789,11 +884,12 @@ export class NarrativeSDK {
 
           for (let i = 0; i < choiceNode.options.length; i++) {
             const opt = choiceNode.options[i];
-            if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap)) {
+            if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node)) {
+              const reason = this.describeUnsatisfiableReason(opt.condition, nodeMap, node);
               issues.push({
                 kind: 'unsatisfiable_condition',
                 severity: 'warning',
-                message: `章节 "${chapter.title}" 节点 "${node.id}" 选项 #${i} "${opt.text}" 的条件在剧情中永远不可满足`,
+                message: `章节 "${chapter.title}" 节点 "${node.id}" 选项 #${i} "${opt.text}" 的条件永远不可满足${reason ? '：' + reason : ''}`,
                 chapterId: chapter.id,
                 nodeId: node.id,
                 path: [
@@ -832,26 +928,49 @@ export class NarrativeSDK {
     }
 
     const cyclePaths = this.findCycles(nodeMap, chapterMap);
+
     for (const cycle of cyclePaths) {
-      const hasExit = this.cycleHasExit(cycle.nodeId, nodeMap);
-      if (!hasExit) {
+      const cycleNodeIds = new Set(cycle.path.map((s) => s.nodeId));
+      const hasExitToNonCycle = cycle.path.some((step) => {
+        const node = nodeMap.get(step.nodeId);
+        if (!node) return false;
+        const nextIds = this.getNextIds(node);
+        return nextIds.some((nextId) => !cycleNodeIds.has(nextId) && nodeMap.has(nextId));
+      });
+
+      if (!hasExitToNonCycle) {
         issues.push({
           kind: 'no_exit_from_loop',
           severity: 'error',
-          message: `节点 "${cycle.nodeId}" 处于循环中且没有出口，玩家将永远无法到达结局`,
+          message: `节点 "${cycle.nodeId}" 处于循环中且所有分支都绕回循环，玩家将永远无法到达结局`,
           chapterId: cycle.chapterId,
           nodeId: cycle.nodeId,
           path: cycle.path,
         });
       } else {
-        issues.push({
-          kind: 'infinite_loop',
-          severity: 'warning',
-          message: `节点 "${cycle.nodeId}" 处于循环中，需确认条件分支能跳出循环`,
-          chapterId: cycle.chapterId,
-          nodeId: cycle.nodeId,
-          path: cycle.path,
+        const anyCycleNodeReachesEnding = cycle.path.some((step) => {
+          const reachableEndings = reachability.get(step.nodeId);
+          return reachableEndings && reachableEndings.size > 0;
         });
+        if (!anyCycleNodeReachesEnding) {
+          issues.push({
+            kind: 'no_exit_from_loop',
+            severity: 'error',
+            message: `循环中的节点虽然有不绕回循环的出口，但所有出口路径均无法到达结局`,
+            chapterId: cycle.chapterId,
+            nodeId: cycle.nodeId,
+            path: cycle.path,
+          });
+        } else {
+          issues.push({
+            kind: 'infinite_loop',
+            severity: 'warning',
+            message: `节点 "${cycle.nodeId}" 处于循环中，需确认条件分支能跳出循环到达结局`,
+            chapterId: cycle.chapterId,
+            nodeId: cycle.nodeId,
+            path: cycle.path,
+          });
+        }
       }
     }
 
@@ -921,29 +1040,173 @@ export class NarrativeSDK {
 
   private isConditionPossiblySatisfiable(
     condition: Condition | ConditionGroup,
-    nodeMap: Map<string, StoryNode>
+    nodeMap: Map<string, StoryNode>,
+    choiceNode?: StoryNode
   ): boolean {
     if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
       const group = condition as ConditionGroup;
       if (group.type === 'and') {
-        return group.conditions.every((c) => this.isConditionPossiblySatisfiable(c, nodeMap));
+        return group.conditions.every((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode));
       }
-      return group.conditions.some((c) => this.isConditionPossiblySatisfiable(c, nodeMap));
+      return group.conditions.some((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode));
     }
 
     const cond = condition as Condition;
     const varName = cond.var;
 
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+    if (setVarNodes.length === 0) return false;
+
+    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    if (!this.canConditionBeMet(cond, possibleValues)) return false;
+
+    if (choiceNode) {
+      const reachableFromChoice = this.findNodesReachableFrom(choiceNode.id, nodeMap);
+      const anySetVarReachable = setVarNodes.some((n) => reachableFromChoice.has(n.id) || n.id === choiceNode.id);
+      if (!anySetVarReachable) {
+        const allPathsFromStart = this.findNodesReachableFrom(nodeMap.values().next().value?.id || '', nodeMap);
+        const anySetVarOnGlobalPath = setVarNodes.some((n) => allPathsFromStart.has(n.id));
+        if (!anySetVarOnGlobalPath) return false;
+        const choiceReachableFromStart = allPathsFromStart.has(choiceNode.id);
+        const anySetVarBeforeChoice = setVarNodes.some((n) => {
+          if (!choiceReachableFromStart) return true;
+          const setVarReachable = this.findNodesReachableFrom(n.id, nodeMap);
+          return setVarReachable.has(choiceNode.id);
+        });
+        if (!anySetVarBeforeChoice) return false;
+      }
+    }
+
+    return true;
+  }
+
+  private findSetVarNodes(varName: string, nodeMap: Map<string, StoryNode>): StoryNode[] {
+    const result: StoryNode[] = [];
+    for (const node of nodeMap.values()) {
+      const actions = this.getNodeActions(node);
+      if (actions.some((a) => a.type === 'setVar' && a.key === varName)) {
+        result.push(node);
+      }
+    }
+    return result;
+  }
+
+  private collectPossibleValues(varName: string, nodeMap: Map<string, StoryNode>): { numbers: number[]; strings: string[]; booleans: boolean[] } {
+    const numbers: number[] = [];
+    const strings: string[] = [];
+    const booleans: boolean[] = [];
+
     for (const node of nodeMap.values()) {
       const actions = this.getNodeActions(node);
       for (const action of actions) {
         if (action.type === 'setVar' && action.key === varName) {
-          return true;
+          const val = action.value;
+          if (typeof val === 'number') {
+            if (action.op === 'add') {
+              numbers.push(val);
+            } else if (action.op === 'sub') {
+              numbers.push(-val);
+            } else {
+              numbers.push(val);
+            }
+          } else if (typeof val === 'string') {
+            strings.push(val);
+          } else if (typeof val === 'boolean') {
+            booleans.push(val);
+          }
         }
       }
     }
+    return { numbers, strings, booleans };
+  }
 
-    return false;
+  private canConditionBeMet(cond: Condition, possible: { numbers: number[]; strings: string[]; booleans: boolean[] }): boolean {
+    const target = cond.value;
+    if (possible.booleans.length > 0 && typeof target === 'boolean') {
+      if (cond.op === '==' && !possible.booleans.includes(target)) return false;
+      if (cond.op === '!=' && possible.booleans.length === 1 && possible.booleans[0] === target) return false;
+    }
+    if (possible.strings.length > 0 && typeof target === 'string') {
+      if (cond.op === '==' && !possible.strings.includes(target)) return false;
+      if (cond.op === '!=' && possible.strings.length === 1 && possible.strings[0] === target) return false;
+    }
+    if (possible.numbers.length > 0 && typeof target === 'number') {
+      const setValues = possible.numbers;
+      const hasDirectSet = setValues.some((v) => {
+        switch (cond.op) {
+          case '==': return v === target;
+          case '!=': return v !== target;
+          case '>': return v > target;
+          case '<': return v < target;
+          case '>=': return v >= target;
+          case '<=': return v <= target;
+          default: return false;
+        }
+      });
+      if (hasDirectSet) return true;
+      const hasAdditiveOps = setValues.some((v) => v !== 0);
+      if (hasAdditiveOps) return true;
+      return false;
+    }
+    if (possible.numbers.length === 0 && possible.strings.length === 0 && possible.booleans.length === 0) return false;
+    return true;
+  }
+
+  private findNodesReachableFrom(startNodeId: string, nodeMap: Map<string, StoryNode>): Set<string> {
+    const visited = new Set<string>();
+    const stack = [startNodeId];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const node = nodeMap.get(id);
+      if (!node) continue;
+      for (const nextId of this.getNextIds(node)) {
+        if (!visited.has(nextId)) stack.push(nextId);
+      }
+    }
+    return visited;
+  }
+
+  private describeUnsatisfiableReason(
+    condition: Condition | ConditionGroup,
+    nodeMap: Map<string, StoryNode>,
+    choiceNode: StoryNode
+  ): string {
+    if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
+      const group = condition as ConditionGroup;
+      const subReasons = group.conditions
+        .map((c) => this.describeUnsatisfiableReason(c, nodeMap, choiceNode))
+        .filter((r) => r);
+      return subReasons.join(group.type === 'and' ? ' 且 ' : ' 或 ');
+    }
+
+    const cond = condition as Condition;
+    const varName = cond.var;
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+
+    if (setVarNodes.length === 0) {
+      return `变量 "${varName}" 在整个脚本中没有任何节点设置过`;
+    }
+
+    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    if (!this.canConditionBeMet(cond, possibleValues)) {
+      const valDesc = typeof cond.value === 'number'
+        ? `数值只可能为 [${possibleValues.numbers.join(', ')}]，不满足 ${cond.op} ${cond.value}`
+        : typeof cond.value === 'string'
+        ? `字符串只可能为 [${possibleValues.strings.join(', ')}]，不满足 ${cond.op} "${cond.value}"`
+        : `布尔值只可能为 [${possibleValues.booleans.join(', ')}]，不满足 ${cond.op} ${cond.value}`;
+      return valDesc;
+    }
+
+    const reachableFromChoice = this.findNodesReachableFrom(choiceNode.id, nodeMap);
+    const anySetVarReachable = setVarNodes.some((n) => reachableFromChoice.has(n.id) || n.id === choiceNode.id);
+    if (!anySetVarReachable) {
+      const setVarNodeIds = setVarNodes.map((n) => n.id).join(', ');
+      return `设置变量 "${varName}" 的节点 (${setVarNodeIds}) 不在当前选项的可达路径上`;
+    }
+
+    return '';
   }
 
   private getNodeActions(node: StoryNode): Action[] {
@@ -1088,19 +1351,6 @@ export class NarrativeSDK {
       seen.add(key);
       return true;
     });
-  }
-
-  private cycleHasExit(cycleNodeId: string, nodeMap: Map<string, StoryNode>): boolean {
-    const node = nodeMap.get(cycleNodeId);
-    if (!node) return false;
-
-    if (node.type === 'choice') {
-      const choiceNode = node as NodeChoice;
-      if (choiceNode.options.length > 1) return true;
-    }
-
-    const nextIds = this.getNextIds(node);
-    return nextIds.length > 1;
   }
 
   setLocale(locale: string): void {

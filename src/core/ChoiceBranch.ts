@@ -130,7 +130,10 @@ export class ChoiceBranch {
   }
 
   getChoiceHistory(): PlayerChoiceRecord[] {
-    return [...this.choiceHistory];
+    return this.choiceHistory.map((rec) => ({
+      ...rec,
+      localizedText: this.localizeFn ? this.localizeFn(rec.optionText) : rec.localizedText,
+    }));
   }
 
   setChoiceHistory(history: PlayerChoiceRecord[]): void {
