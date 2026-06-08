@@ -86,15 +86,46 @@ export class DebugRunner {
       const prev = prevMap.get(id);
       const curr = currMap.get(id);
       if (!prev && curr) {
-        changes.push({ questId: id, change: 'start' });
+        changes.push({
+          questId: id,
+          change: 'start',
+          oldStatus: 'inactive',
+          newStatus: curr.status,
+        });
       } else if (prev && curr) {
         if (prev.status !== curr.status) {
-          if (curr.status === 'completed') changes.push({ questId: id, change: 'complete' });
-          else if (curr.status === 'failed') changes.push({ questId: id, change: 'fail' });
+          if (curr.status === 'completed') {
+            changes.push({
+              questId: id,
+              change: 'complete',
+              oldStatus: prev.status,
+              newStatus: curr.status,
+            });
+          } else if (curr.status === 'failed') {
+            changes.push({
+              questId: id,
+              change: 'fail',
+              oldStatus: prev.status,
+              newStatus: curr.status,
+            });
+          } else if (prev.status === 'inactive' && curr.status === 'active') {
+            changes.push({
+              questId: id,
+              change: 'start',
+              oldStatus: prev.status,
+              newStatus: curr.status,
+            });
+          }
         }
         for (let i = 0; i < curr.completedObjectives.length; i++) {
-          if (curr.completedObjectives[i] && !prev.completedObjectives[i]) {
-            changes.push({ questId: id, change: 'objectiveComplete', objectiveIndex: i });
+          if (curr.completedObjectives[i] && (prev.completedObjectives[i] === undefined || !prev.completedObjectives[i])) {
+            changes.push({
+              questId: id,
+              change: 'objectiveComplete',
+              objectiveIndex: i,
+              oldStatus: prev.status,
+              newStatus: curr.status,
+            });
           }
         }
       }
@@ -211,8 +242,20 @@ export class DebugRunner {
     return this.sdk.removeItem(itemId, count);
   }
 
-  completeObjective(questId: string, objectiveIndex: number): void {
-    this.sdk.getQuestSystem().completeObjective(questId, objectiveIndex);
+  startQuest(questId: string): boolean {
+    return this.sdk.getQuestSystem().startQuest(questId);
+  }
+
+  completeQuest(questId: string): boolean {
+    return this.sdk.getQuestSystem().completeQuest(questId);
+  }
+
+  failQuest(questId: string): boolean {
+    return this.sdk.getQuestSystem().failQuest(questId);
+  }
+
+  completeObjective(questId: string, objectiveIndex: number): boolean {
+    return this.sdk.getQuestSystem().completeObjective(questId, objectiveIndex);
   }
 
   getSDK(): NarrativeSDK {

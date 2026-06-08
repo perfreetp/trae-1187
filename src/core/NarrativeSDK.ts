@@ -114,60 +114,143 @@ export class NarrativeSDK {
     this.trackSessionEvent(type as string, data);
   }
 
-  private trackSessionEvent(type: string, data: unknown): void {
-    const now = Date.now();
-    const stateSnap = this.state !== 'idle' ? {
+  private currentStateSnapshot(): DebugSessionRecord['stateSnapshot'] | undefined {
+    return this.state !== 'idle' ? {
       nodeId: this.currentNodeId,
       chapterId: this.chapterManager.getCurrentChapterId(),
-      variables: this.variableCondition.getAll(),
+      variables: { ...this.variableCondition.getAll() },
       inventoryCount: this.inventory.getAllEntries().length,
       activeQuestCount: this.questSystem.getActiveQuests().length,
     } : undefined;
+  }
 
+  private pushSessionRecord(record: Omit<DebugSessionRecord, 'timestamp' | 'stateSnapshot'> & { stateSnapshot?: DebugSessionRecord['stateSnapshot'] }): void {
+    const snap = record.stateSnapshot !== undefined ? record.stateSnapshot : this.currentStateSnapshot();
+    this.sessionRecords.push({
+      ...record,
+      timestamp: Date.now(),
+      stateSnapshot: snap,
+    });
+  }
+
+  private trackSessionEvent(type: string, data: unknown): void {
     switch (type) {
-      case 'choice': {
-        const cd = data as { nodeId: string };
-        this.sessionRecords.push({ type: 'choice', timestamp: now, data: { nodeId: cd.nodeId }, stateSnapshot: stateSnap });
-        break;
-      }
       case 'puzzleResolved': {
         const pr = data as { puzzleId: string; result: PuzzleResult; nextNodeId: string | null };
-        this.sessionRecords.push({ type: 'puzzle_result', timestamp: now, data: { puzzleId: pr.puzzleId, result: pr.result, nextNodeId: pr.nextNodeId }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'puzzle_result',
+          data: { puzzleId: pr.puzzleId, result: pr.result, nextNodeId: pr.nextNodeId },
+        });
         break;
       }
       case 'chapterChange': {
         const cc = data as { chapterId: string };
-        this.sessionRecords.push({ type: 'chapter_change', timestamp: now, data: { chapterId: cc.chapterId }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({ type: 'chapter_change', data: { chapterId: cc.chapterId } });
         break;
       }
       case 'ending': {
         const ed = data as { endingId: string; name: string };
-        this.sessionRecords.push({ type: 'ending', timestamp: now, data: { endingId: ed.endingId, name: ed.name }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({ type: 'ending', data: { endingId: ed.endingId, name: ed.name } });
         break;
       }
       case 'itemAdd': {
         const ia = data as { itemId: string; count: number };
-        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'itemAdd', itemId: ia.itemId, count: ia.count }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'itemAdd', itemId: ia.itemId, count: ia.count, desc: `获得物品 ${ia.itemId} x${ia.count}` },
+        });
         break;
       }
       case 'itemRemove': {
         const ir = data as { itemId: string; count: number };
-        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'itemRemove', itemId: ir.itemId, count: ir.count }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'itemRemove', itemId: ir.itemId, count: ir.count, desc: `失去物品 ${ir.itemId} x${ir.count}` },
+        });
         break;
       }
       case 'questStart': {
         const qs = data as { questId: string };
-        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'questStart', questId: qs.questId }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'questStart', questId: qs.questId, desc: `开始任务 ${qs.questId}` },
+        });
         break;
       }
       case 'questComplete': {
         const qc = data as { questId: string };
-        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'questComplete', questId: qc.questId }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'questComplete', questId: qc.questId, desc: `完成任务 ${qc.questId}` },
+        });
+        break;
+      }
+      case 'questFail': {
+        const qf = data as { questId: string };
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'questFail', questId: qf.questId, desc: `任务失败 ${qf.questId}` },
+        });
+        break;
+      }
+      case 'objectiveComplete': {
+        const oc = data as { questId: string; objectiveIndex: number };
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'objectiveComplete', questId: oc.questId, objectiveIndex: oc.objectiveIndex, desc: `完成任务目标 ${oc.questId}#${oc.objectiveIndex}` },
+        });
         break;
       }
       case 'variableChange': {
         const vc = data as { key: string; oldValue: unknown; newValue: unknown };
-        this.sessionRecords.push({ type: 'step', timestamp: now, data: { event: 'variableChange', key: vc.key, oldValue: vc.oldValue, newValue: vc.newValue }, stateSnapshot: stateSnap });
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'variableChange', key: vc.key, oldValue: vc.oldValue, newValue: vc.newValue, desc: `变量 ${vc.key}: ${JSON.stringify(vc.oldValue)} → ${JSON.stringify(vc.newValue)}` },
+        });
+        break;
+      }
+      case 'puzzle': {
+        const pz = data as { puzzleId: string; params?: Record<string, unknown> };
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'enterPuzzle', puzzleId: pz.puzzleId, params: pz.params, desc: `进入谜题节点：${pz.puzzleId}` },
+        });
+        break;
+      }
+      case 'choice': {
+        // NOTE: 'choice' 事件是"展示选项"，不计入玩家选择记录，记为 step 说明进入了选择节点
+        const ch = data as { nodeId: string; options: Array<{ index: number; text: string; disabled: boolean }> };
+        this.pushSessionRecord({
+          type: 'step',
+          data: {
+            event: 'enterChoice',
+            nodeId: ch.nodeId,
+            optionCount: ch.options?.length ?? 0,
+            desc: `进入选择节点：${ch.nodeId}（${ch.options?.length ?? 0} 个选项）`,
+          },
+        });
+        break;
+      }
+      case 'choiceExpired': {
+        const ce = data as { nodeId: string; defaultIndex: number };
+        this.pushSessionRecord({
+          type: 'step',
+          data: { event: 'choiceExpired', nodeId: ce.nodeId, defaultIndex: ce.defaultIndex, desc: `选择超时，使用默认选项 #${ce.defaultIndex}` },
+        });
+        break;
+      }
+      case 'achievement': {
+        const ac = data as AchievementState;
+        this.pushSessionRecord({
+          type: 'achievement',
+          data: {
+            id: ac.id,
+            name: ac.name,
+            description: ac.description,
+            unlockedAt: ac.unlockedAt,
+            desc: `解锁成就：${ac.name}`,
+          },
+        });
         break;
       }
     }
@@ -272,6 +355,10 @@ export class NarrativeSDK {
     if (node.actions) {
       this.executeActions(node.actions);
     }
+    this.pushSessionRecord({
+      type: 'step',
+      data: { event: 'dialogue', nodeId: node.id, speaker: node.speaker, desc: `对白 ${node.speaker}: ${node.text.slice(0, 30)}${node.text.length > 30 ? '...' : ''}` },
+    });
     this.logDebug('Dialogue played', { nodeId: node.id, speaker: node.speaker });
     return line;
   }
@@ -461,6 +548,20 @@ export class NarrativeSDK {
       this.logError(`Invalid choice: ${nodeId} option ${optionIndex}`);
       return null;
     }
+
+    // 真正的玩家选择记录（区别于进入选择节点的 enterChoice step）
+    const chosenOption = choiceNode.options[optionIndex];
+    this.pushSessionRecord({
+      type: 'choice',
+      data: {
+        chapterId,
+        nodeId: choiceNode.id,
+        optionIndex,
+        optionText: this.localizeText(chosenOption?.text || ''),
+        expired,
+        desc: `玩家${expired ? '（超时）' : ''}选择了选项 #${optionIndex}${chosenOption?.text ? ': ' + this.localizeText(chosenOption.text) : ''}`,
+      },
+    });
 
     if (result.actions) {
       this.executeActions(result.actions);
@@ -942,8 +1043,10 @@ export class NarrativeSDK {
       for (const node of chapter.nodes) {
         if (node.type === 'choice') {
           const choiceNode = node as NodeChoice;
-          const allDisabled = choiceNode.options.every((opt) =>
-            opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node)
+          const allDisabled = choiceNode.options.every((opt, i) =>
+            opt.condition && !this.isConditionPossiblySatisfiable(
+              opt.condition, nodeMap, node, { choiceNodeId: node.id, optionIndex: i }
+            )
           );
 
           if (allDisabled && choiceNode.options.length > 0) {
@@ -968,9 +1071,10 @@ export class NarrativeSDK {
 
           for (let i = 0; i < choiceNode.options.length; i++) {
             const opt = choiceNode.options[i];
-            if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node)) {
-              const reason = this.describeUnsatisfiableReason(opt.condition, nodeMap, node);
-              const detail = this.buildUnsatisfiableDetail(opt.condition, nodeMap, node);
+            const excludeAt = { choiceNodeId: node.id, optionIndex: i };
+            if (opt.condition && !this.isConditionPossiblySatisfiable(opt.condition, nodeMap, node, excludeAt)) {
+              const reason = this.describeUnsatisfiableReason(opt.condition, nodeMap, node, excludeAt);
+              const detail = this.buildUnsatisfiableDetail(opt.condition, nodeMap, node, excludeAt);
               issues.push({
                 kind: 'unsatisfiable_condition',
                 severity: 'warning',
@@ -1144,23 +1248,24 @@ export class NarrativeSDK {
   private isConditionPossiblySatisfiable(
     condition: Condition | ConditionGroup,
     nodeMap: Map<string, StoryNode>,
-    choiceNode?: StoryNode
+    choiceNode?: StoryNode,
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
   ): boolean {
     if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
       const group = condition as ConditionGroup;
       if (group.type === 'and') {
-        return group.conditions.every((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode));
+        return group.conditions.every((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode, excludeOptionAt));
       }
-      return group.conditions.some((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode));
+      return group.conditions.some((c) => this.isConditionPossiblySatisfiable(c, nodeMap, choiceNode, excludeOptionAt));
     }
 
     const cond = condition as Condition;
     const varName = cond.var;
 
-    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap, excludeOptionAt);
     if (setVarNodes.length === 0) return false;
 
-    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    const possibleValues = this.collectPossibleValues(varName, nodeMap, excludeOptionAt);
     if (!this.canConditionBeMet(cond, possibleValues)) return false;
 
     if (choiceNode) {
@@ -1183,10 +1288,14 @@ export class NarrativeSDK {
     return true;
   }
 
-  private findSetVarNodes(varName: string, nodeMap: Map<string, StoryNode>): StoryNode[] {
+  private findSetVarNodes(
+    varName: string,
+    nodeMap: Map<string, StoryNode>,
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
+  ): StoryNode[] {
     const result: StoryNode[] = [];
     for (const node of nodeMap.values()) {
-      const actions = this.getNodeActions(node);
+      const actions = this.getNodeActions(node, excludeOptionAt);
       if (actions.some((a) => a.type === 'setVar' && a.key === varName)) {
         result.push(node);
       }
@@ -1194,23 +1303,35 @@ export class NarrativeSDK {
     return result;
   }
 
-  private collectPossibleValues(varName: string, nodeMap: Map<string, StoryNode>): { numbers: number[]; strings: string[]; booleans: boolean[] } {
+  private collectPossibleValues(
+    varName: string,
+    nodeMap: Map<string, StoryNode>,
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
+  ): { numbers: number[]; strings: string[]; booleans: boolean[]; totalAdditive: number; maxSingleSet: number } {
     const numbers: number[] = [];
     const strings: string[] = [];
     const booleans: boolean[] = [];
+    let totalAdditive = 0;
+    let maxSingleSet = -Infinity;
 
     for (const node of nodeMap.values()) {
-      const actions = this.getNodeActions(node);
+      const actions = this.getNodeActions(node, excludeOptionAt);
       for (const action of actions) {
         if (action.type === 'setVar' && action.key === varName) {
           const val = action.value;
           if (typeof val === 'number') {
-            if (action.op === 'add') {
+            const op = action.op || 'set';
+            if (op === 'add') {
               numbers.push(val);
-            } else if (action.op === 'sub') {
+              totalAdditive += val;
+              if (val > maxSingleSet) maxSingleSet = val;
+            } else if (op === 'sub') {
               numbers.push(-val);
+              totalAdditive -= val;
+              if (-val > maxSingleSet) maxSingleSet = -val;
             } else {
               numbers.push(val);
+              if (val > maxSingleSet) maxSingleSet = val;
             }
           } else if (typeof val === 'string') {
             strings.push(val);
@@ -1220,7 +1341,8 @@ export class NarrativeSDK {
         }
       }
     }
-    return { numbers, strings, booleans };
+    if (maxSingleSet === -Infinity) maxSingleSet = 0;
+    return { numbers, strings, booleans, totalAdditive, maxSingleSet };
   }
 
   private canConditionBeMet(cond: Condition, possible: { numbers: number[]; strings: string[]; booleans: boolean[] }): boolean {
@@ -1274,28 +1396,29 @@ export class NarrativeSDK {
   private describeUnsatisfiableReason(
     condition: Condition | ConditionGroup,
     nodeMap: Map<string, StoryNode>,
-    choiceNode: StoryNode
+    choiceNode: StoryNode,
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
   ): string {
     if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
       const group = condition as ConditionGroup;
       const subReasons = group.conditions
-        .map((c) => this.describeUnsatisfiableReason(c, nodeMap, choiceNode))
+        .map((c) => this.describeUnsatisfiableReason(c, nodeMap, choiceNode, excludeOptionAt))
         .filter((r) => r);
       return subReasons.join(group.type === 'and' ? ' 且 ' : ' 或 ');
     }
 
     const cond = condition as Condition;
     const varName = cond.var;
-    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap, excludeOptionAt);
 
     if (setVarNodes.length === 0) {
       return `变量 "${varName}" 在整个脚本中没有任何节点设置过`;
     }
 
-    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    const possibleValues = this.collectPossibleValues(varName, nodeMap, excludeOptionAt);
     if (!this.canConditionBeMet(cond, possibleValues)) {
       const valDesc = typeof cond.value === 'number'
-        ? `数值只可能为 [${possibleValues.numbers.join(', ')}]，不满足 ${cond.op} ${cond.value}`
+        ? `排除当前选项动作后，数值只可能为 [${possibleValues.numbers.join(', ')}]，累加总和为 ${possibleValues.totalAdditive}，不满足 ${cond.op} ${cond.value}`
         : typeof cond.value === 'string'
         ? `字符串只可能为 [${possibleValues.strings.join(', ')}]，不满足 ${cond.op} "${cond.value}"`
         : `布尔值只可能为 [${possibleValues.booleans.join(', ')}]，不满足 ${cond.op} ${cond.value}`;
@@ -1315,10 +1438,11 @@ export class NarrativeSDK {
   private buildUnsatisfiableDetail(
     condition: Condition | ConditionGroup,
     nodeMap: Map<string, StoryNode>,
-    choiceNode: StoryNode
+    choiceNode: StoryNode,
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
   ): string {
     const parts: string[] = [];
-    this.collectConditionDetails(condition, nodeMap, choiceNode, parts);
+    this.collectConditionDetails(condition, nodeMap, choiceNode, parts, excludeOptionAt);
     return parts.join(' | ');
   }
 
@@ -1326,21 +1450,22 @@ export class NarrativeSDK {
     condition: Condition | ConditionGroup,
     nodeMap: Map<string, StoryNode>,
     choiceNode: StoryNode,
-    parts: string[]
+    parts: string[],
+    excludeOptionAt?: { choiceNodeId: string; optionIndex: number }
   ): void {
     if ('type' in condition && (condition.type === 'and' || condition.type === 'or')) {
       const group = condition as ConditionGroup;
       for (const c of group.conditions) {
-        this.collectConditionDetails(c, nodeMap, choiceNode, parts);
+        this.collectConditionDetails(c, nodeMap, choiceNode, parts, excludeOptionAt);
       }
       return;
     }
     const cond = condition as Condition;
     const varName = cond.var;
-    const setVarNodes = this.findSetVarNodes(varName, nodeMap);
+    const setVarNodes = this.findSetVarNodes(varName, nodeMap, excludeOptionAt);
 
     if (setVarNodes.length === 0) {
-      parts.push(`变量 "${varName}" 在脚本中未被任何节点设置过`);
+      parts.push(`变量 "${varName}" 在脚本中未被任何节点设置过（当前选项自己的动作已排除，不算作选择前的变量来源）`);
       return;
     }
 
@@ -1367,18 +1492,17 @@ export class NarrativeSDK {
       parts.push(`设置变量 "${varName}" 的节点 (${nodeList}) 与当前选项互斥或不在可达路径上`);
     }
 
-    const possibleValues = this.collectPossibleValues(varName, nodeMap);
+    const possibleValues = this.collectPossibleValues(varName, nodeMap, excludeOptionAt);
     if (typeof cond.value === 'number' && possibleValues.numbers.length > 0) {
-      const setOps = possibleValues.numbers;
-      if (setOps.length > 0) {
-        const isOnlyAdditive = setOps.every((v) => v > 0 && v < Math.abs(cond.value as number));
-        if (isOnlyAdditive && (cond.op === '>' || cond.op === '>=')) {
-          const total = setOps.reduce((a, b) => a + b, 0);
-          parts.push(`变量 "${varName}" 的所有增量操作总和为 ${total}，最大也达不到 ${cond.op} ${cond.value} 的要求`);
+      const target = cond.value as number;
+      if ((cond.op === '>' || cond.op === '>=')) {
+        const total = possibleValues.totalAdditive;
+        const maxSingle = possibleValues.maxSingleSet;
+        if (total <= target) {
+          parts.push(`排除当前选项动作后，变量 "${varName}" 的所有增量/设置操作总和为 ${total}，要求 ${cond.op} ${target}，永远达不到`);
         }
-        const maxPossible = Math.max(...setOps);
-        if (maxPossible < (cond.value as number) && (cond.op === '>' || cond.op === '>=')) {
-          parts.push(`变量 "${varName}" 单次设置的最大值为 ${maxPossible}，均小于要求 ${cond.op} ${cond.value}`);
+        if (maxSingle < target && total <= target) {
+          parts.push(`排除当前选项动作后，变量 "${varName}" 单次设置的最大值为 ${maxSingle}，累加总和为 ${total}，均小于要求 ${cond.op} ${target}`);
         }
       }
     }
@@ -1446,14 +1570,18 @@ export class NarrativeSDK {
     pathSet.delete(nodeId);
   }
 
-  private getNodeActions(node: StoryNode): Action[] {
+  private getNodeActions(node: StoryNode, excludeOptionAt?: { choiceNodeId: string; optionIndex: number }): Action[] {
     const actions: Action[] = [];
     switch (node.type) {
       case 'dialogue':
         if (node.actions) actions.push(...node.actions);
         break;
       case 'choice':
-        for (const opt of node.options) {
+        for (let i = 0; i < node.options.length; i++) {
+          if (excludeOptionAt && excludeOptionAt.choiceNodeId === node.id && excludeOptionAt.optionIndex === i) {
+            continue;
+          }
+          const opt = node.options[i];
           if (opt.actions) actions.push(...opt.actions);
         }
         break;
@@ -1613,7 +1741,18 @@ export class NarrativeSDK {
   }
 
   unlockAchievement(id: string, name: string, description?: string): boolean {
-    return this.saveLoad.unlockAchievement(id, name, description);
+    const unlocked = this.saveLoad.unlockAchievement(id, name, description);
+    if (unlocked) {
+      const achievement: AchievementState = {
+        id,
+        name,
+        description,
+        unlocked: true,
+        unlockedAt: Date.now(),
+      };
+      this.emit('achievement', achievement);
+    }
+    return unlocked;
   }
 
   isAchievementUnlocked(id: string): boolean {

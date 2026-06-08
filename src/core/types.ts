@@ -362,6 +362,8 @@ export interface DebugStepQuestChange {
   questId: string;
   change: 'start' | 'complete' | 'fail' | 'objectiveComplete';
   objectiveIndex?: number;
+  oldStatus?: 'inactive' | 'active' | 'completed' | 'failed';
+  newStatus?: 'inactive' | 'active' | 'completed' | 'failed';
 }
 
 export interface DebugStepInfo {
